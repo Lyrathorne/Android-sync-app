@@ -4,9 +4,11 @@ import com.example.devicesync.core.protocol.ProtocolFrameReader
 import com.example.devicesync.core.protocol.ProtocolFrameWriter
 import com.example.devicesync.core.protocol.ProtocolMessage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.net.ConnectException
 import java.net.InetSocketAddress
@@ -36,9 +38,23 @@ class TcpDeviceConnection(
             reader = ProtocolFrameReader(newSocket.getInputStream())
             writer = ProtocolFrameWriter(newSocket.getOutputStream())
             NetworkLogger.info("TCP connection established")
+        } catch (error: CancellationException) {
+            disconnect()
+            throw error
         } catch (error: Throwable) {
             disconnect()
             throw error.toConnectionException()
+        }
+    }
+
+    override suspend fun onHandshakeComplete() = withContext(Dispatchers.IO) {
+        socket?.soTimeout = 0
+        NetworkLogger.info("TCP read timeout disabled after handshake")
+    }
+
+    override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage = withContext(Dispatchers.IO) {
+        withTimeout(timeoutMs) {
+            receive()
         }
     }
 
@@ -48,6 +64,8 @@ class TcpDeviceConnection(
             try {
                 NetworkLogger.info("Sending ${message.type}")
                 currentWriter.write(message)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 disconnect()
                 throw error.toConnectionException()
@@ -61,6 +79,8 @@ class TcpDeviceConnection(
             val message = currentReader.read()
             NetworkLogger.info("Received ${message.type}")
             message
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             disconnect()
             throw error.toConnectionException()

@@ -5,6 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import com.example.devicesync.core.settings.ThemeMode
 
 private val LightColors = lightColorScheme(
     primary = LightPrimary,
@@ -31,10 +32,16 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun DeviceSyncTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: ThemeMode = if (darkTheme) ThemeMode.DARK else ThemeMode.LIGHT,
     content: @Composable () -> Unit,
 ) {
+    val useDarkTheme = when (themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
+        colorScheme = if (useDarkTheme) DarkColors else LightColors,
         typography = Typography,
         content = content,
     )

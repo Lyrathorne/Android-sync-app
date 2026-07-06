@@ -8,6 +8,7 @@ import com.example.devicesync.core.data.RoomDeviceRepository
 import com.example.devicesync.core.data.RoomOutgoingMessageQueue
 import com.example.devicesync.core.data.RoomProcessedMessageRepository
 import com.example.devicesync.core.database.DeviceSyncDatabase
+import com.example.devicesync.core.discovery.AndroidNsdDiscoveryService
 import com.example.devicesync.core.network.ConnectionManager
 import com.example.devicesync.core.network.NetworkMonitor
 import com.example.devicesync.core.settings.DataStoreAppSettingsRepository
@@ -42,6 +43,7 @@ class DeviceSyncContainer(context: Context) {
     val outgoingMessageQueue = RoomOutgoingMessageQueue(database.pendingMessageDao())
     val processedMessageRepository = RoomProcessedMessageRepository(database.processedMessageDao())
     val networkMonitor = NetworkMonitor(context)
+    val discoveryService = AndroidNsdDiscoveryService(context)
     val connectionManager = ConnectionManager(
         scope = applicationScope,
         identityRepository = identityRepository,
@@ -51,4 +53,8 @@ class DeviceSyncContainer(context: Context) {
         settingsRepository = settingsRepository,
         networkMonitor = networkMonitor,
     )
+
+    init {
+        connectionManager.startStartupAutoConnect()
+    }
 }

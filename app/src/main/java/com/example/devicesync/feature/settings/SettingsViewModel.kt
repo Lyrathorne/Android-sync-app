@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.devicesync.core.settings.AppSettingsRepository
+import com.example.devicesync.core.settings.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +26,7 @@ class SettingsViewModel(
                     it.copy(
                         autoConnectTrustedComputers = settings.autoConnectEnabled,
                         restoreConnectionAfterDisconnect = settings.restoreConnectionEnabled,
+                        useDarkTheme = settings.themeMode == ThemeMode.DARK,
                     )
                 }
             }
@@ -51,6 +53,9 @@ class SettingsViewModel(
 
     fun setUseDarkTheme(enabled: Boolean) {
         _uiState.update { it.copy(useDarkTheme = enabled) }
+        viewModelScope.launch {
+            settingsRepository?.setThemeMode(if (enabled) ThemeMode.DARK else ThemeMode.LIGHT)
+        }
     }
 
     fun showAboutDialog() {

@@ -1,32 +1,42 @@
 package com.example.devicesync.core.network
 
+import com.example.devicesync.BuildConfig
 import com.example.devicesync.core.data.DeviceRepository
 import com.example.devicesync.core.data.OutgoingMessageQueue
 import com.example.devicesync.core.data.PairedDevice
 import com.example.devicesync.core.data.ProcessedMessageRepository
 import com.example.devicesync.core.model.ConnectionStatus
+import com.example.devicesync.core.protocol.ConnectionClosePayload
 import com.example.devicesync.core.protocol.ConnectionHelloAckPayload
 import com.example.devicesync.core.protocol.ConnectionHelloPayload
 import com.example.devicesync.core.protocol.MessageAckPayload
 import com.example.devicesync.core.protocol.PingPayload
 import com.example.devicesync.core.protocol.PongPayload
+import com.example.devicesync.core.protocol.ProtocolErrorPayload
 import com.example.devicesync.core.protocol.ProtocolMessage
 import com.example.devicesync.core.protocol.ProtocolMessageType
 import com.example.devicesync.core.protocol.ProtocolSerializer
 import com.example.devicesync.core.settings.AppSettingsRepository
 import com.example.devicesync.core.settings.DeviceIdentityRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import java.time.Instant
@@ -36,7 +46,7 @@ class ConnectionManager(
     private val connectionFactory: () -> DeviceConnection = { TcpDeviceConnection() },
     private val androidDeviceId: String = UUID.randomUUID().toString(),
     private val androidDeviceName: String = android.os.Build.MODEL.orEmpty().ifBlank { "Android device" },
-    private val appVersion: String = "0.1.0",
+    private val appVersion: String = BuildConfig.VERSION_NAME,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val identityRepository: DeviceIdentityRepository? = null,
     private val deviceRepository: DeviceRepository? = null,
@@ -51,138 +61,247 @@ class ConnectionManager(
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
+    private val connectionAttemptMutex = Mutex()
+    private val terminationMutex = Mutex()
+    private val ackMutex = Mutex()
+
     private var connection: DeviceConnection? = null
     private var writerChannel: Channel<ProtocolMessage>? = null
     private var writerJob: Job? = null
     private var readerJob: Job? = null
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
+    private var startupConnectJob: Job? = null
     private var manualDisconnect = false
     private var activeDevice: PairedDevice? = null
     private var remoteDeviceId: String? = null
     private var pingSequence = 0L
     private var missedPongs = 0
     private var pendingPong: PendingPong? = null
+    private var sessionId = 0L
+    private var terminatedSessionId = 0L
     private val pendingAcks = mutableMapOf<String, ProtocolMessage>()
     private val ackRetryJobs = mutableMapOf<String, Job>()
 
     suspend fun connect(host: String, port: Int): ConnectionState.Connected {
+        return connectManually(host, port)
+    }
+
+    suspend fun connectManually(host: String, port: Int): ConnectionState.Connected {
         manualDisconnect = false
         reconnectJob?.cancel()
-        stopSession(updateState = false, sendClose = false)
+        reconnectJob = null
+        NetworkLogger.info("Manual connection started")
+        return connectInternal(host, port, ConnectionAttemptSource.Manual)
+    }
 
-        val activeConnection = connectionFactory()
-        connection = activeConnection
-
-        return try {
-            _state.value = ConnectionState.Connecting(host, port)
-            activeConnection.connect(host, port)
-
-            _state.value = ConnectionState.Handshaking(host, port)
-            val hello = buildHelloMessage()
-            activeConnection.send(hello)
-            val response = activeConnection.receive()
-            val connected = validateHelloAck(response, hello.messageId, host, port)
-
-            remoteDeviceId = connected.deviceId
-            activeDevice = connected.toPairedDevice()
-            deviceRepository?.saveDevice(activeDevice ?: connected.toPairedDevice())
-            settingsRepository?.setLastSelectedDeviceId(connected.deviceId)
-            _state.value = connected
-
-            startWriter(activeConnection)
-            startReader(activeConnection)
-            startHeartbeat(connected.deviceId)
-            restorePendingMessages(connected.deviceId)
-            NetworkLogger.info("Handshake completed with ${connected.deviceName}")
-            connected
-        } catch (error: Throwable) {
-            val connectionError = error.toConnectionException()
-            NetworkLogger.error("Connection failed: ${connectionError::class.simpleName}", connectionError)
-            runCatching { activeConnection.disconnect() }
-            if (connection === activeConnection) connection = null
-            _state.value = ConnectionState.Failed(connectionError.message.orEmpty())
-            maybeScheduleReconnect(connectionError)
-            throw connectionError
+    fun startStartupAutoConnect() {
+        if (startupConnectJob?.isActive == true) return
+        val settingsRepository = settingsRepository ?: return
+        val deviceRepository = deviceRepository ?: return
+        startupConnectJob = scope.launch {
+            try {
+                val settings = settingsRepository.settings.first()
+                if (!settings.autoConnectEnabled || !settings.restoreConnectionEnabled) return@launch
+                val deviceId = settings.lastSelectedDeviceId ?: return@launch
+                val device = deviceRepository.getDevice(deviceId)
+                if (device == null) {
+                    settingsRepository.setLastSelectedDeviceId(null)
+                    return@launch
+                }
+                val monitor = networkMonitor
+                if (monitor != null) {
+                    monitor.networkState.first { state -> state is NetworkState.Available }
+                }
+                connectInternal(device.host, device.port, ConnectionAttemptSource.Startup)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val connectionError = error.toConnectionException()
+                NetworkLogger.error("Startup auto-connect failed", connectionError)
+                _state.value = ConnectionState.Failed(connectionError.message.orEmpty())
+            }
         }
     }
 
     suspend fun disconnect() {
         manualDisconnect = true
         reconnectJob?.cancel()
+        reconnectJob = null
         NetworkLogger.info("Manual disconnect")
-        stopSession(updateState = true, sendClose = true)
+        terminateSession(SessionTerminationReason.ManualDisconnect, reconnectAllowed = false)
+    }
+
+    suspend fun disconnectDevice(deviceId: String) {
+        if (activeDevice?.id == deviceId || remoteDeviceId == deviceId) {
+            disconnect()
+        }
+        settingsRepository?.setLastSelectedDeviceId(null)
     }
 
     suspend fun sendQueued(message: ProtocolMessage) {
         if (message.requiresAcknowledgement) {
             outgoingMessageQueue?.enqueue(message)
-            pendingAcks[message.messageId] = message
+            ackMutex.withLock {
+                pendingAcks[message.messageId] = message
+            }
             startAckRetry(message)
         }
         writerChannel?.send(message)
     }
 
-    private fun startWriter(activeConnection: DeviceConnection) {
+    private suspend fun connectInternal(
+        host: String,
+        port: Int,
+        source: ConnectionAttemptSource,
+    ): ConnectionState.Connected = connectionAttemptMutex.withLock {
+        if (source != ConnectionAttemptSource.Reconnect) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+        }
+        terminateSession(SessionTerminationReason.NewConnectionAttempt, reconnectAllowed = false)
+
+        val activeConnection = connectionFactory()
+        connection = activeConnection
+        val currentSessionId = ++sessionId
+        terminatedSessionId = 0L
+
+        return@withLock try {
+            _state.value = ConnectionState.Connecting(host, port)
+            activeConnection.connect(host, port)
+
+            _state.value = ConnectionState.Handshaking(host, port)
+            NetworkLogger.info("Handshake started session=$currentSessionId")
+            val hello = buildHelloMessage()
+            activeConnection.send(hello)
+            val response = activeConnection.receiveHandshake(HELLO_ACK_TIMEOUT_MS)
+            val connected = validateHelloAck(response, hello.messageId, host, port)
+            activeConnection.onHandshakeComplete()
+
+            remoteDeviceId = connected.deviceId
+            activeDevice = connected.toPairedDevice()
+            deviceRepository?.saveDevice(activeDevice ?: connected.toPairedDevice())
+            settingsRepository?.setLastSelectedDeviceId(connected.deviceId)
+            reconnectJob?.cancel()
+            reconnectJob = null
+            _state.value = connected.copy(reconnectAttempt = 0)
+
+            startWriter(activeConnection, currentSessionId)
+            startReader(activeConnection, currentSessionId)
+            startHeartbeat(connected.deviceId, currentSessionId)
+            restorePendingMessages(connected.deviceId)
+            NetworkLogger.info("Handshake completed session=$currentSessionId device=${connected.deviceName}")
+            connected
+        } catch (error: CancellationException) {
+            withContext(NonCancellable) {
+                activeConnection.disconnect()
+                if (connection === activeConnection) connection = null
+            }
+            throw error
+        } catch (error: Throwable) {
+            val connectionError = error.toConnectionException()
+            NetworkLogger.error("Connection failed: ${connectionError::class.simpleName}", connectionError)
+            withContext(NonCancellable) {
+                activeConnection.disconnect()
+                if (connection === activeConnection) connection = null
+            }
+            _state.value = ConnectionState.Failed(connectionError.message.orEmpty())
+            maybeScheduleReconnect(connectionError)
+            throw connectionError
+        }
+    }
+
+    private fun startWriter(activeConnection: DeviceConnection, ownerSessionId: Long) {
         writerChannel?.close()
         writerJob?.cancel()
         val channel = Channel<ProtocolMessage>(Channel.BUFFERED)
         writerChannel = channel
         writerJob = scope.launch {
-            for (message in channel) {
-                activeConnection.send(message)
-                if (message.requiresAcknowledgement) {
-                    outgoingMessageQueue?.markSent(message.messageId)
+            NetworkLogger.info("Writer started session=$ownerSessionId")
+            try {
+                for (message in channel) {
+                    activeConnection.send(message)
+                    if (message.requiresAcknowledgement) {
+                        outgoingMessageQueue?.markSent(message.messageId)
+                    }
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                terminateSession(
+                    SessionTerminationReason.WriterError(error.toConnectionException()),
+                    reconnectAllowed = true,
+                )
+            } finally {
+                NetworkLogger.info("Writer stopped session=$ownerSessionId")
             }
         }
     }
 
-    private fun startReader(activeConnection: DeviceConnection) {
+    private fun startReader(activeConnection: DeviceConnection, ownerSessionId: Long) {
         readerJob?.cancel()
         readerJob = scope.launch {
+            NetworkLogger.info("Reader started session=$ownerSessionId")
             try {
-                while (true) {
+                while (currentCoroutineContext().isActive && ownerSessionId == sessionId) {
                     handleIncomingMessage(activeConnection.receive())
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 if (!manualDisconnect) {
-                    handleConnectionLost(error.toConnectionException())
+                    terminateSession(
+                        SessionTerminationReason.ReaderError(error.toConnectionException()),
+                        reconnectAllowed = true,
+                    )
                 }
+            } finally {
+                NetworkLogger.info("Reader stopped session=$ownerSessionId")
             }
         }
     }
 
-    private fun startHeartbeat(recipientDeviceId: String) {
+    private fun startHeartbeat(recipientDeviceId: String, ownerSessionId: Long) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            NetworkLogger.info("Heartbeat started")
-            while (true) {
-                delay(heartbeatConfig.pingInterval)
-                val ping = buildPingMessage(recipientDeviceId)
-                val waitingPong = PendingPong(
-                    messageId = ping.messageId,
-                    sequence = pingSequence,
-                    deferred = CompletableDeferred(),
-                )
-                pendingPong = waitingPong
-                writerChannel?.send(ping)
-                NetworkLogger.info("Ping sent")
+            NetworkLogger.info("Heartbeat started session=$ownerSessionId")
+            try {
+                while (currentCoroutineContext().isActive && ownerSessionId == sessionId) {
+                    delay(heartbeatConfig.pingInterval)
+                    val ping = buildPingMessage(recipientDeviceId)
+                    val waitingPong = PendingPong(
+                        messageId = ping.messageId,
+                        sequence = pingSequence,
+                        deferred = CompletableDeferred(),
+                    )
+                    pendingPong = waitingPong
+                    writerChannel?.send(ping)
+                    NetworkLogger.info("Ping sent sequence=${waitingPong.sequence} session=$ownerSessionId")
 
-                val pongReceived = withTimeoutOrNull(heartbeatConfig.pongTimeout) {
-                    waitingPong.deferred.await()
-                } == true
-                if (pongReceived) {
-                    missedPongs = 0
-                } else {
-                    missedPongs += 1
-                    NetworkLogger.info("Heartbeat timeout")
-                    updateConnectedDiagnostics()
+                    val pongReceived = withTimeoutOrNull(heartbeatConfig.pongTimeout) {
+                        waitingPong.deferred.await()
+                    } == true
+                    if (pongReceived) {
+                        missedPongs = 0
+                    } else {
+                        missedPongs += 1
+                        NetworkLogger.info("Heartbeat timeout session=$ownerSessionId")
+                        updateConnectedDiagnostics()
+                    }
+                    if (missedPongs >= heartbeatConfig.maxMissedPongs) {
+                        terminateSession(SessionTerminationReason.HeartbeatTimeout, reconnectAllowed = true)
+                        return@launch
+                    }
                 }
-                if (missedPongs >= heartbeatConfig.maxMissedPongs) {
-                    handleConnectionLost(ConnectionException.Timeout())
-                    return@launch
-                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                terminateSession(
+                    SessionTerminationReason.HeartbeatError(error.toConnectionException()),
+                    reconnectAllowed = true,
+                )
+            } finally {
+                NetworkLogger.info("Heartbeat stopped session=$ownerSessionId")
             }
         }
     }
@@ -192,8 +311,37 @@ class ConnectionManager(
             ProtocolMessageType.CONNECTION_PONG.value -> handlePong(message)
             ProtocolMessageType.CONNECTION_PING.value -> handlePing(message)
             ProtocolMessageType.MESSAGE_ACK.value -> handleAck(message)
+            ProtocolMessageType.CONNECTION_CLOSE.value -> handleRemoteClose(message)
+            ProtocolMessageType.ERROR_PROTOCOL.value -> handleProtocolError(message)
+            ProtocolMessageType.CONNECTION_HELLO_ACK.value,
+            ProtocolMessageType.CONNECTION_HELLO.value -> throw ConnectionException.InvalidMessage()
             else -> handleFeatureMessage(message)
         }
+    }
+
+    private suspend fun handleRemoteClose(message: ProtocolMessage) {
+        if (!isFromActiveDevice(message)) return
+        val payload = runCatching {
+            ProtocolSerializer.decodePayload<ConnectionClosePayload>(message.payload)
+        }.getOrDefault(ConnectionClosePayload())
+        if (message.requiresAcknowledgement) {
+            sendAck(message, "processed")
+        }
+        terminateSession(
+            SessionTerminationReason.RemoteClose(payload.reason),
+            reconnectAllowed = payload.allowReconnect,
+        )
+    }
+
+    private suspend fun handleProtocolError(message: ProtocolMessage) {
+        if (!isFromActiveDevice(message)) return
+        val payload = ProtocolSerializer.decodePayload<ProtocolErrorPayload>(message.payload)
+        val error = ConnectionException.InvalidMessage(payload.code)
+        _state.value = ConnectionState.Failed(payload.message ?: payload.code)
+        terminateSession(
+            SessionTerminationReason.ProtocolError(error),
+            reconnectAllowed = !payload.fatal,
+        )
     }
 
     private suspend fun handlePong(message: ProtocolMessage) {
@@ -204,7 +352,7 @@ class ConnectionManager(
             payload.sequence == waitingPong.sequence &&
             message.senderDeviceId == remoteDeviceId
         ) {
-            NetworkLogger.info("Pong received")
+            NetworkLogger.info("Pong received sequence=${payload.sequence}")
             waitingPong.deferred.complete(true)
             pendingPong = null
             updateConnectedDiagnostics(lastPongAtUtc = payload.receivedAtUtc, missed = 0)
@@ -212,6 +360,7 @@ class ConnectionManager(
     }
 
     private suspend fun handlePing(message: ProtocolMessage) {
+        if (!isFromActiveDevice(message)) return
         val payload = ProtocolSerializer.decodePayload<PingPayload>(message.payload)
         val pong = ProtocolMessage(
             protocolVersion = PROTOCOL_VERSION,
@@ -229,12 +378,46 @@ class ConnectionManager(
     }
 
     private suspend fun handleAck(message: ProtocolMessage) {
+        if (!isFromActiveDevice(message)) return
         val correlationId = message.correlationId ?: return
-        ProtocolSerializer.decodePayload<MessageAckPayload>(message.payload)
-        val originalMessage = pendingAcks.remove(correlationId) ?: return
-        ackRetryJobs.remove(correlationId)?.cancel()
-        outgoingMessageQueue?.markAcknowledged(originalMessage.messageId)
-        NetworkLogger.info("ACK received")
+        val payload = ProtocolSerializer.decodePayload<MessageAckPayload>(message.payload)
+        val originalMessage = ackMutex.withLock {
+            val original = pendingAcks[correlationId] ?: return
+            when (payload.status) {
+                "received" -> null
+                "processed" -> {
+                    pendingAcks.remove(correlationId)
+                    ackRetryJobs.remove(correlationId)?.cancel()
+                    original
+                }
+                "rejected", "failed" -> {
+                    pendingAcks.remove(correlationId)
+                    ackRetryJobs.remove(correlationId)?.cancel()
+                    original
+                }
+                else -> throw ConnectionException.InvalidMessage("Unknown ACK status: ${payload.status}")
+            }
+        }
+
+        when (payload.status) {
+            "received" -> NetworkLogger.info("ACK received intermediate")
+            "processed" -> {
+                if (originalMessage != null) {
+                    outgoingMessageQueue?.markAcknowledged(originalMessage.messageId)
+                }
+                NetworkLogger.info("ACK processed")
+            }
+            "rejected", "failed" -> {
+                if (originalMessage != null) {
+                    outgoingMessageQueue?.markFailed(
+                        originalMessage.messageId,
+                        payload.errorMessage ?: payload.errorCode ?: payload.status,
+                    )
+                }
+                NetworkLogger.info("ACK ${payload.status}")
+            }
+        }
+        updateConnectedDiagnostics()
     }
 
     private suspend fun handleFeatureMessage(message: ProtocolMessage) {
@@ -268,79 +451,111 @@ class ConnectionManager(
             ?.forEach { pending ->
                 if (pending.attemptCount < ackConfig.maxAttempts) {
                     val message = ProtocolSerializer.deserialize(pending.serializedMessage)
-                    pendingAcks[message.messageId] = message
+                    ackMutex.withLock {
+                        pendingAcks[message.messageId] = message
+                    }
                     startAckRetry(message, alreadyAttempted = pending.attemptCount)
                     writerChannel?.send(message)
                 }
             }
     }
 
-    private suspend fun handleConnectionLost(error: ConnectionException) {
-        NetworkLogger.info("Connection lost")
-        stopSession(updateState = false, sendClose = false)
-        activeDevice?.let { deviceRepository?.updateConnectionStatus(it.id, ConnectionStatus.OFFLINE) }
-        _state.value = ConnectionState.Failed(error.message.orEmpty())
-        maybeScheduleReconnect(error)
-    }
-
     private suspend fun maybeScheduleReconnect(error: ConnectionException) {
         if (manualDisconnect || !error.isRecoverable()) return
+        if (settingsRepository?.settings?.first()?.restoreConnectionEnabled == false) return
         val device = activeDevice ?: return
         if (!device.isAutoConnectEnabled) return
         if (reconnectJob?.isActive == true) return
 
         reconnectJob = scope.launch {
             var attempt = 1
-            while (attempt <= reconnectConfig.maxAttempts && !manualDisconnect) {
-                val networkState = networkMonitor?.networkState?.value
-                if (networkState == NetworkState.Unavailable) {
-                    _state.value = ConnectionState.NetworkUnavailable
-                    networkMonitor.networkState.first { it == NetworkState.Available }
-                }
+            try {
+                while (attempt <= reconnectConfig.maxAttempts && !manualDisconnect) {
+                    val monitor = networkMonitor
+                    if (monitor?.networkState?.value == NetworkState.Unavailable) {
+                        _state.value = ConnectionState.NetworkUnavailable
+                        monitor.networkState.first { state -> state is NetworkState.Available }
+                    }
 
-                val delayDuration = reconnectConfig.delayForAttempt(attempt)
-                _state.value = ConnectionState.Reconnecting(
-                    deviceId = device.id,
-                    host = device.host,
-                    port = device.port,
-                    attempt = attempt,
-                    nextRetryMessage = "Повторная попытка через ${delayDuration.inWholeSeconds} секунд",
-                )
-                NetworkLogger.info("Reconnect scheduled")
-                delay(delayDuration)
-                try {
-                    NetworkLogger.info("Reconnect attempt started")
-                    connect(device.host, device.port)
-                    return@launch
-                } catch (ignored: ConnectionException) {
-                    attempt += 1
+                    val delayDuration = reconnectConfig.delayForAttempt(attempt)
+                    _state.value = ConnectionState.Reconnecting(
+                        deviceId = device.id,
+                        host = device.host,
+                        port = device.port,
+                        attempt = attempt,
+                        nextRetryMessage = "Retry in ${delayDuration.inWholeSeconds} seconds",
+                    )
+                    NetworkLogger.info("Reconnect scheduled attempt=$attempt")
+                    delay(delayDuration)
+                    try {
+                        NetworkLogger.info("Reconnect attempt started attempt=$attempt")
+                        connectInternal(device.host, device.port, ConnectionAttemptSource.Reconnect)
+                        return@launch
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (ignored: ConnectionException) {
+                        attempt += 1
+                    }
                 }
+            } catch (error: CancellationException) {
+                throw error
             }
         }
     }
 
-    private suspend fun stopSession(updateState: Boolean, sendClose: Boolean) {
-        heartbeatJob?.cancel()
-        readerJob?.cancel()
-        writerJob?.cancel()
-        writerChannel?.close()
-        heartbeatJob = null
-        readerJob = null
-        writerJob = null
-        writerChannel = null
-        val activeConnection = connection
-        connection = null
-        if (activeConnection != null) {
-            if (sendClose) runCatching { activeConnection.send(buildCloseMessage()) }
-            activeConnection.disconnect()
-        }
-        pendingPong = null
-        ackRetryJobs.values.forEach { it.cancel() }
-        ackRetryJobs.clear()
-        missedPongs = 0
-        if (updateState) {
+    private suspend fun terminateSession(
+        reason: SessionTerminationReason,
+        reconnectAllowed: Boolean,
+    ) {
+        val shouldReconnect = terminationMutex.withLock {
+            val currentSessionId = sessionId
+            if (currentSessionId != 0L && terminatedSessionId == currentSessionId) {
+                NetworkLogger.info("Duplicate cleanup suppressed session=$currentSessionId")
+                return
+            }
+            terminatedSessionId = currentSessionId
+            NetworkLogger.info("Session terminating session=$currentSessionId reason=$reason")
+
+            val currentJob = currentCoroutineContext()[Job]
+            val jobs = listOf(heartbeatJob, writerJob, readerJob)
+            jobs.filterNotNull().filter { it != currentJob }.forEach { it.cancel() }
+            heartbeatJob = null
+            writerJob = null
+            readerJob = null
+            writerChannel?.close()
+            writerChannel = null
+            pendingPong = null
+
+            ackMutex.withLock {
+                ackRetryJobs.values.forEach { it.cancel() }
+                ackRetryJobs.clear()
+            }
+
+            val activeConnection = connection
+            connection = null
+            withContext(NonCancellable) {
+                if (activeConnection != null) {
+                    if (reason is SessionTerminationReason.ManualDisconnect) {
+                        runCatching { activeConnection.send(buildCloseMessage()) }
+                    }
+                    activeConnection.disconnect()
+                }
+            }
+
+            missedPongs = 0
             activeDevice?.let { deviceRepository?.updateConnectionStatus(it.id, ConnectionStatus.OFFLINE) }
-            _state.value = ConnectionState.Disconnected
+            val error = reason.error
+            when {
+                reason is SessionTerminationReason.ManualDisconnect -> _state.value = ConnectionState.Disconnected
+                error != null -> _state.value = ConnectionState.Failed(error.message.orEmpty())
+                reason is SessionTerminationReason.NewConnectionAttempt -> Unit
+                else -> _state.value = ConnectionState.Disconnected
+            }
+            reconnectAllowed && !manualDisconnect && error?.isRecoverable() != false
+        }
+
+        if (shouldReconnect) {
+            maybeScheduleReconnect(SessionTerminationReason.toConnectionException(reason))
         }
     }
 
@@ -349,7 +564,7 @@ class ConnectionManager(
             deviceName = getAndroidDeviceName(),
             appVersion = appVersion,
             protocolVersion = PROTOCOL_VERSION,
-            capabilities = listOf("text"),
+            capabilities = SupportedCapabilities.values,
         )
         return ProtocolMessage(
             protocolVersion = PROTOCOL_VERSION,
@@ -421,30 +636,44 @@ class ConnectionManager(
         )
     }
 
-    private fun updateConnectedDiagnostics(lastPongAtUtc: String? = null, missed: Int = missedPongs) {
+    private suspend fun updateConnectedDiagnostics(lastPongAtUtc: String? = null, missed: Int = missedPongs) {
+        val pendingCount = ackMutex.withLock { pendingAcks.size }
         val current = _state.value
         if (current is ConnectionState.Connected) {
             _state.value = current.copy(
                 lastPongAtUtc = lastPongAtUtc ?: current.lastPongAtUtc,
                 missedPongs = missed,
-                pendingMessageCount = pendingAcks.size,
+                pendingMessageCount = pendingCount,
             )
         }
     }
 
-    private fun startAckRetry(message: ProtocolMessage, alreadyAttempted: Int = 0) {
-        ackRetryJobs[message.messageId]?.cancel()
-        ackRetryJobs[message.messageId] = scope.launch {
-            var attempts = alreadyAttempted
-            while (pendingAcks.containsKey(message.messageId) && attempts < ackConfig.maxAttempts) {
-                delay(ackConfig.timeout)
-                if (!pendingAcks.containsKey(message.messageId)) return@launch
-                attempts += 1
-                writerChannel?.send(message)
-                outgoingMessageQueue?.markSent(message.messageId)
+    private fun startAckRetry(message: ProtocolMessage, alreadyAttempted: Int = 1) {
+        scope.launch {
+            ackMutex.withLock {
+                ackRetryJobs.remove(message.messageId)?.cancel()
+                ackRetryJobs[message.messageId] = currentCoroutineContext()[Job] ?: return@withLock
             }
-            if (pendingAcks.remove(message.messageId) != null) {
-                outgoingMessageQueue?.markFailed(message.messageId, "ACK timeout")
+            try {
+                var attempts = alreadyAttempted
+                while (attempts < ackConfig.maxAttempts) {
+                    delay(ackConfig.timeout)
+                    val shouldRetry = ackMutex.withLock { pendingAcks.containsKey(message.messageId) }
+                    if (!shouldRetry) return@launch
+                    attempts += 1
+                    writerChannel?.send(message)
+                    outgoingMessageQueue?.markSent(message.messageId)
+                }
+                val timedOut = ackMutex.withLock {
+                    ackRetryJobs.remove(message.messageId)
+                    pendingAcks.remove(message.messageId) != null
+                }
+                if (timedOut) {
+                    outgoingMessageQueue?.markFailed(message.messageId, "ACK timeout")
+                    updateConnectedDiagnostics()
+                }
+            } catch (error: CancellationException) {
+                throw error
             }
         }
     }
@@ -455,6 +684,13 @@ class ConnectionManager(
 
     private suspend fun getAndroidDeviceName(): String {
         return identityRepository?.getDeviceName() ?: androidDeviceName
+    }
+
+    private fun isFromActiveDevice(message: ProtocolMessage): Boolean {
+        val remote = remoteDeviceId ?: return true
+        if (message.senderDeviceId != remote) return false
+        val recipient = message.recipientDeviceId
+        return recipient == null || recipient == androidDeviceId
     }
 
     private fun ConnectionState.Connected.toPairedDevice(): PairedDevice {
@@ -469,6 +705,38 @@ class ConnectionManager(
             isAutoConnectEnabled = true,
             connectionStatus = ConnectionStatus.CONNECTED,
         )
+    }
+
+    private companion object {
+        const val HELLO_ACK_TIMEOUT_MS = 8_000L
+    }
+}
+
+private enum class ConnectionAttemptSource {
+    Manual,
+    Reconnect,
+    Startup,
+}
+
+private sealed interface SessionTerminationReason {
+    val error: ConnectionException?
+        get() = null
+
+    data object ManualDisconnect : SessionTerminationReason
+    data object NewConnectionAttempt : SessionTerminationReason
+    data object HeartbeatTimeout : SessionTerminationReason {
+        override val error: ConnectionException = ConnectionException.Timeout()
+    }
+    data class ReaderError(override val error: ConnectionException) : SessionTerminationReason
+    data class WriterError(override val error: ConnectionException) : SessionTerminationReason
+    data class HeartbeatError(override val error: ConnectionException) : SessionTerminationReason
+    data class RemoteClose(val reason: String?) : SessionTerminationReason
+    data class ProtocolError(override val error: ConnectionException) : SessionTerminationReason
+
+    companion object {
+        fun toConnectionException(reason: SessionTerminationReason): ConnectionException {
+            return reason.error ?: ConnectionException.ConnectionClosed()
+        }
     }
 }
 

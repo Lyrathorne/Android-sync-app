@@ -50,6 +50,8 @@ class DataStoreAppSettingsRepository(
             autoConnectEnabled = preferences[Keys.AutoConnectEnabled] ?: true,
             restoreConnectionEnabled = preferences[Keys.RestoreConnectionEnabled] ?: true,
             lastSelectedDeviceId = preferences[Keys.LastSelectedDeviceId],
+            themeMode = preferences[Keys.ThemeMode]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
+                ?: ThemeMode.SYSTEM,
         )
     }
 
@@ -70,6 +72,10 @@ class DataStoreAppSettingsRepository(
             }
         }
     }
+
+    override suspend fun setThemeMode(mode: ThemeMode) {
+        dataStore.edit { it[Keys.ThemeMode] = mode.name }
+    }
 }
 
 private object Keys {
@@ -78,6 +84,7 @@ private object Keys {
     val LastSelectedDeviceId = stringPreferencesKey("last_selected_device_id")
     val AutoConnectEnabled = booleanPreferencesKey("auto_connect_enabled")
     val RestoreConnectionEnabled = booleanPreferencesKey("restore_connection_enabled")
+    val ThemeMode = stringPreferencesKey("theme_mode")
 }
 
 private fun String?.isValidDeviceId(): Boolean {

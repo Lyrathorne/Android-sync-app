@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.devicesync.R
+import com.example.devicesync.core.discovery.DiscoveredDevice
+import com.example.devicesync.core.discovery.DiscoveryState
 import com.example.devicesync.ui.theme.DeviceSyncTheme
 import kotlinx.coroutines.launch
 
@@ -52,6 +54,8 @@ fun AddDeviceRoute(
         uiState = uiState.value,
         onBackClick = onBackClick,
         onStartSearchClick = viewModel::startSearch,
+        onStopSearchClick = viewModel::stopSearch,
+        onConnectDiscoveredClick = viewModel::connectDiscovered,
         onQrClick = {},
         onManualClick = viewModel::showManualForm,
         onIpChanged = viewModel::onIpChanged,
@@ -66,6 +70,8 @@ fun AddDeviceScreen(
     uiState: AddDeviceUiState,
     onBackClick: () -> Unit,
     onStartSearchClick: () -> Unit,
+    onStopSearchClick: () -> Unit,
+    onConnectDiscoveredClick: (DiscoveredDevice) -> Unit,
     onQrClick: () -> Unit,
     onManualClick: () -> Unit,
     onIpChanged: (String) -> Unit,
@@ -112,6 +118,8 @@ fun AddDeviceScreen(
             AutoSearchCard(
                 uiState = uiState,
                 onStartSearchClick = onStartSearchClick,
+                onStopSearchClick = onStopSearchClick,
+                onConnectDiscoveredClick = onConnectDiscoveredClick,
             )
             OutlinedButton(
                 onClick = {
@@ -144,6 +152,8 @@ fun AddDeviceScreen(
 private fun AutoSearchCard(
     uiState: AddDeviceUiState,
     onStartSearchClick: () -> Unit,
+    onStopSearchClick: () -> Unit,
+    onConnectDiscoveredClick: (DiscoveredDevice) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -158,31 +168,99 @@ private fun AutoSearchCard(
                 text = stringResource(R.string.auto_search_body),
                 style = MaterialTheme.typography.bodyMedium,
             )
-            Button(
-                onClick = onStartSearchClick,
-                enabled = !uiState.isSearching,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.start_search))
-            }
-            if (uiState.isSearching) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            when (uiState.discoveryState) {
+                DiscoveryState.Idle -> Button(
+                    onClick = onStartSearchClick,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    CircularProgressIndicator()
-                    Text(stringResource(R.string.searching))
+                    Text(stringResource(R.string.start_search))
+                }
+                DiscoveryState.Starting,
+                DiscoveryState.Searching -> {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator()
+                        Text(stringResource(R.string.searching))
+                    }
+                    OutlinedButton(onClick = onStopSearchClick, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.stop_search))
+                    }
+                }
+                DiscoveryState.Stopping -> Text(stringResource(R.string.stopping_search))
+                is DiscoveryState.PermissionRequired -> Text(
+                    text = stringResource(R.string.discovery_permission_required),
+                    color = MaterialTheme.colorScheme.error,
+                )
+                is DiscoveryState.Failed -> {
+                    Text(
+                        text = uiState.discoveryState.userMessage,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Button(onClick = onStartSearchClick, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.retry))
+                    }
                 }
             }
-            uiState.foundDeviceName?.let { deviceName ->
+            if (uiState.discoveredDevices.isEmpty() && uiState.discoveryState == DiscoveryState.Searching) {
+                Text(stringResource(R.string.no_computers_yet))
+            }
+            uiState.discoveredDevices.forEach { device ->
+                DiscoveredDeviceCard(device, onConnectDiscoveredClick)
+            }
+            uiState.discoveryConnectionError?.let {
+                Text(text = it, color = MaterialTheme.colorScheme.error)
+            }
+            DiscoveryDiagnosticsText(uiState)
+        }
+    }
+}
+
+@Composable
+private fun DiscoveredDeviceCard(
+    device: DiscoveredDevice,
+    onConnectClick: (DiscoveredDevice) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(device.deviceName, style = MaterialTheme.typography.titleMedium)
+            Text("DeviceSync для Windows")
+            Text("${device.hostAddresses.firstOrNull().orEmpty()}:${device.port}")
+            Text("Протокол: ${device.protocolMin ?: "?"}-${device.protocolMax ?: "?"}")
+            if (!device.isProtocolCompatible) {
                 Text(
-                    text = stringResource(R.string.found_computer, deviceName),
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = stringResource(R.string.incompatible_protocol),
+                    color = MaterialTheme.colorScheme.error,
                 )
+            }
+            Button(
+                onClick = { onConnectClick(device) },
+                enabled = device.isProtocolCompatible,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.connect))
             }
         }
     }
+}
+
+@Composable
+private fun DiscoveryDiagnosticsText(uiState: AddDeviceUiState) {
+    val diagnostics = uiState.discoveryDiagnostics
+    Text(
+        text = "Discovery state: ${uiState.discoveryState::class.simpleName}\n" +
+            "Services found: ${diagnostics.foundServices}\n" +
+            "Services resolved: ${diagnostics.resolvedServices}\n" +
+            "Last callback: ${diagnostics.lastCallback ?: "-"}\n" +
+            "Last error: ${diagnostics.lastError ?: "-"}\n" +
+            "Service type: ${diagnostics.activeServiceType}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -281,6 +359,8 @@ private fun AddDeviceScreenPreview() {
             uiState = AddDeviceUiState(isManualFormVisible = true),
             onBackClick = {},
             onStartSearchClick = {},
+            onStopSearchClick = {},
+            onConnectDiscoveredClick = {},
             onQrClick = {},
             onManualClick = {},
             onIpChanged = {},

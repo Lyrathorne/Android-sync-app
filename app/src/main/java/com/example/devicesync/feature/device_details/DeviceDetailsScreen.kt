@@ -58,6 +58,7 @@ fun DeviceDetailsRoute(
         uiState = uiState.value,
         onBackClick = onBackClick,
         onUnavailableActionClick = {},
+        onConnectClick = viewModel::connect,
         onDisconnectClick = viewModel::disconnect,
         onDeleteClick = viewModel::requestDelete,
         onDismissDeleteDialog = viewModel::dismissDeleteDialog,
@@ -71,6 +72,7 @@ fun DeviceDetailsScreen(
     uiState: DeviceDetailsUiState,
     onBackClick: () -> Unit,
     onUnavailableActionClick: () -> Unit,
+    onConnectClick: () -> Unit,
     onDisconnectClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onDismissDeleteDialog: () -> Unit,
@@ -149,6 +151,15 @@ fun DeviceDetailsScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.edit_permissions))
+                }
+                Button(
+                    onClick = onConnectClick,
+                    enabled = device.connectionStatus != com.example.devicesync.core.model.ConnectionStatus.CONNECTED &&
+                        device.host != null &&
+                        device.port != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.connect))
                 }
                 OutlinedButton(
                     onClick = onDisconnectClick,
@@ -279,6 +290,7 @@ private fun DeviceDetailsScreenPreview() {
             uiState = DeviceDetailsUiState(device = SampleDevices.devices.first()),
             onBackClick = {},
             onUnavailableActionClick = {},
+            onConnectClick = {},
             onDisconnectClick = {},
             onDeleteClick = {},
             onDismissDeleteDialog = {},

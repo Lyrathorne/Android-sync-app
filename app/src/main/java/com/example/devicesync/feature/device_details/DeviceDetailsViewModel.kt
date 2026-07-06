@@ -81,7 +81,10 @@ class DeviceDetailsViewModel(
         val currentDeviceId = deviceId
         if (currentDeviceId != null) {
             if (deviceRepository != null) {
-                viewModelScope.launch { deviceRepository.removeDevice(currentDeviceId) }
+                viewModelScope.launch {
+                    connectionManager.disconnectDevice(currentDeviceId)
+                    deviceRepository.removeDevice(currentDeviceId)
+                }
             } else {
                 deviceStore.removeDevice(currentDeviceId)
             }
@@ -98,6 +101,22 @@ class DeviceDetailsViewModel(
             } else {
                 deviceStore.markDisconnected(currentDeviceId)
             }
+        }
+    }
+
+    fun connect() {
+        val device = _uiState.value.device ?: return
+        val host = device.host
+        val port = device.port
+        if (host.isNullOrBlank() || port == null) {
+            _uiState.update { it.copy(connectionStateText = "Invalid host or port") }
+            return
+        }
+        viewModelScope.launch {
+            runCatching { connectionManager.connect(host, port) }
+                .onFailure { error ->
+                    _uiState.update { it.copy(connectionStateText = error.message.orEmpty()) }
+                }
         }
     }
 

@@ -114,6 +114,7 @@ private class FakeDeviceConnection(
     private val onReceive: suspend () -> Unit = {},
 ) : DeviceConnection {
     private var sentHello: ProtocolMessage? = null
+    private var helloAckReturned = false
     var disconnectCalled = false
         private set
 
@@ -129,6 +130,10 @@ private class FakeDeviceConnection(
 
     override suspend fun receive(): ProtocolMessage {
         onReceive()
+        if (helloAckReturned) {
+            CompletableDeferred<Unit>().await()
+        }
+        helloAckReturned = true
         return responseProvider(sentHello ?: error("Hello was not sent"))
     }
 

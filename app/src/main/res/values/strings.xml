@@ -71,4 +71,9 @@
     <string name="dark_theme">Использовать тёмную тему</string>
     <string name="about_app">О приложении</string>
     <string name="about_app_body">DeviceSync готовит основу для локальной синхронизации Android и Windows.</string>
+    <string name="stop_search">Stop search</string>
+    <string name="stopping_search">Stopping search...</string>
+    <string name="no_computers_yet">No computers found yet. Keep DeviceSync open on Windows and check that both devices are on the same local network.</string>
+    <string name="discovery_permission_required">Local network discovery permission is required.</string>
+    <string name="incompatible_protocol">Incompatible DeviceSync version. Update Android or Windows app.</string>
 </resources>

@@ -6,6 +6,10 @@ DeviceSync is an Android client foundation for local synchronization with a Wind
 
 At this stage a paired device is only a saved known device. It is not yet a cryptographically trusted device.
 
+## Technical Debt
+
+The Android package/application id is still `com.example.devicesync`. Rename it before publication as a separate refactor after the networking layer is stable.
+
 ## Manual TCP Test
 
 1. Make sure the Android phone and Windows computer are connected to the same local network.

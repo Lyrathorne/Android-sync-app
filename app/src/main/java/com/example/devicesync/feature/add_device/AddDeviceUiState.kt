@@ -1,8 +1,13 @@
 package com.example.devicesync.feature.add_device
 
+import com.example.devicesync.core.discovery.DiscoveredDevice
+import com.example.devicesync.core.discovery.DiscoveryDiagnostics
+import com.example.devicesync.core.discovery.DiscoveryState
+
 data class AddDeviceUiState(
-    val isSearching: Boolean = false,
-    val foundDeviceName: String? = null,
+    val discoveryState: DiscoveryState = DiscoveryState.Idle,
+    val discoveredDevices: List<DiscoveredDevice> = emptyList(),
+    val discoveryDiagnostics: DiscoveryDiagnostics = DiscoveryDiagnostics(),
     val isManualFormVisible: Boolean = false,
     val ipAddress: String = "",
     val port: String = "",
@@ -11,6 +16,7 @@ data class AddDeviceUiState(
     val isManualInputValid: Boolean = false,
     val manualConnectionStatus: ManualConnectionStatus = ManualConnectionStatus.Idle,
     val connectedDeviceId: String? = null,
+    val discoveryConnectionError: String? = null,
 )
 
 enum class ManualConnectionError {

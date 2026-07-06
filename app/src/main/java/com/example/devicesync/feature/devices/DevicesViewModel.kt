@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.devicesync.core.data.DeviceRepository
 import com.example.devicesync.core.model.InMemoryDeviceStore
 import com.example.devicesync.core.model.toDevice
+import com.example.devicesync.core.network.ConnectionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 class DevicesViewModel(
     private val deviceStore: InMemoryDeviceStore = InMemoryDeviceStore(),
     private val deviceRepository: DeviceRepository? = null,
+    private val connectionManager: ConnectionManager? = null,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(DevicesUiState(isLoading = true))
     val uiState: StateFlow<DevicesUiState> = _uiState.asStateFlow()
@@ -39,7 +41,10 @@ class DevicesViewModel(
 
     fun removeDevice(deviceId: String) {
         if (deviceRepository != null) {
-            viewModelScope.launch { deviceRepository.removeDevice(deviceId) }
+            viewModelScope.launch {
+                connectionManager?.disconnectDevice(deviceId)
+                deviceRepository.removeDevice(deviceId)
+            }
         } else {
             deviceStore.removeDevice(deviceId)
         }
@@ -47,10 +52,14 @@ class DevicesViewModel(
 
     class Factory(
         private val deviceRepository: DeviceRepository,
+        private val connectionManager: ConnectionManager,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return DevicesViewModel(deviceRepository = deviceRepository) as T
+            return DevicesViewModel(
+                deviceRepository = deviceRepository,
+                connectionManager = connectionManager,
+            ) as T
         }
     }
 }

@@ -31,7 +31,10 @@ fun DeviceSyncNavHost() {
     ) {
         composable(AppDestination.Devices.route) {
             val devicesViewModel: DevicesViewModel = viewModel(
-                factory = DevicesViewModel.Factory(container.deviceRepository),
+                factory = DevicesViewModel.Factory(
+                    container.deviceRepository,
+                    container.connectionManager,
+                ),
             )
             DevicesRoute(
                 onAddDeviceClick = { navController.navigate(AppDestination.AddDevice.route) },
@@ -47,6 +50,7 @@ fun DeviceSyncNavHost() {
                 factory = AddDeviceViewModel.Factory(
                     container.deviceRepository,
                     container.connectionManager,
+                    container.discoveryService,
                 ),
             )
             AddDeviceRoute(
