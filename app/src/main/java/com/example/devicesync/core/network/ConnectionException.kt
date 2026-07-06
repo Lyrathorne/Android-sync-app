@@ -10,6 +10,21 @@ sealed class ConnectionException(
     class Timeout(cause: Throwable? = null) :
         ConnectionException("Превышено время ожидания", cause)
 
+    class TcpConnectTimeout(val host: String, val port: Int, cause: Throwable? = null) :
+        ConnectionException(
+            "Не удалось подключиться к $host:$port.\nПроверьте Windows Firewall и подключение к одной сети.",
+            cause,
+        )
+
+    class HandshakeTimeout(cause: Throwable? = null) :
+        ConnectionException("HANDSHAKE_TIMEOUT", cause)
+
+    class AuthTimeout(cause: Throwable? = null) :
+        ConnectionException("AUTH_TIMEOUT", cause)
+
+    class PairingTimeout(cause: Throwable? = null) :
+        ConnectionException("PAIRING_TIMEOUT", cause)
+
     class ConnectionRefused(cause: Throwable? = null) :
         ConnectionException("Соединение отклонено", cause)
 

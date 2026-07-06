@@ -15,6 +15,8 @@ class DiscoveryAddressSelector {
                     is Inet6Address -> 1
                     else -> 2
                 }
+            }.thenBy {
+                if (it is Inet4Address && it.isPrivateLanAddress()) 0 else 1
             }.thenBy { it.hostAddress })
             .mapNotNull { it.hostAddress }
     }
@@ -22,5 +24,12 @@ class DiscoveryAddressSelector {
     fun select(addresses: List<String>): String {
         return orderedUsableAddresses(addresses).firstOrNull()
             ?: throw IllegalArgumentException("No usable address was resolved for this computer.")
+    }
+
+    private fun Inet4Address.isPrivateLanAddress(): Boolean {
+        val bytes = address.map { it.toInt() and 0xff }
+        return bytes[0] == 10 ||
+            (bytes[0] == 172 && bytes[1] in 16..31) ||
+            (bytes[0] == 192 && bytes[1] == 168)
     }
 }

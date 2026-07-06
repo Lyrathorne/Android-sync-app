@@ -228,7 +228,7 @@ class PairingCoordinatorTest {
             sessionId = "pair-test",
             pairingSecret = PAIRING_SECRET,
             expiresAtUtc = "2026-07-06T12:02:00Z",
-            hostAddresses = listOf("127.0.0.1"),
+            hostAddresses = listOf("192.168.1.45"),
             port = 54321,
             windowsDeviceId = "windows-test",
             windowsDeviceName = "Windows PC",

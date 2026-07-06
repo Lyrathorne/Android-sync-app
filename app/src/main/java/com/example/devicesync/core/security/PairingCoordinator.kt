@@ -1,7 +1,9 @@
 package com.example.devicesync.core.security
 
 import com.example.devicesync.BuildConfig
+import com.example.devicesync.core.discovery.DiscoveryAddressSelector
 import com.example.devicesync.core.discovery.DEVICESYNC_PROTOCOL_VERSION
+import com.example.devicesync.core.network.ConnectionException
 import com.example.devicesync.core.network.DeviceConnection
 import com.example.devicesync.core.network.TcpDeviceConnection
 import com.example.devicesync.core.protocol.PairingAcceptedPayload
@@ -16,6 +18,7 @@ import com.example.devicesync.core.settings.DeviceIdentityRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,6 +62,7 @@ class DefaultPairingCoordinator(
     private val trustedDeviceRepository: TrustedDeviceRepository,
     private val connectionFactory: () -> DeviceConnection = { TcpDeviceConnection() },
     private val pairingProtocol: PairingProtocol = PairingProtocol(),
+    private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val now: () -> Instant = { Instant.now() },
 ) : PairingCoordinator {
@@ -74,18 +78,14 @@ class DefaultPairingCoordinator(
             return
         }
 
-        val host = payload.hostAddresses.firstOrNull()
-        if (host.isNullOrBlank()) {
+        val hosts = addressSelector.orderedUsableAddresses(payload.hostAddresses)
+        if (hosts.isEmpty()) {
             _state.value = PairingState.Failed("QR-код не содержит адрес компьютера.", "QR_NO_HOST")
             return
         }
 
-        val connection = connectionFactory()
-        active = ActivePairing(payload = payload, connection = connection)
+        val connection = connectPairingSocket(payload, hosts) ?: return
         try {
-            _state.value = PairingState.Connecting(payload.windowsDeviceName)
-            connection.connect(host, payload.port)
-
             val androidDeviceId = identityRepository.getOrCreateDeviceId()
             val androidDeviceName = identityRepository.getDeviceName()
             val androidPublicKey = identityKeyProvider.getOrCreatePublicKey()
@@ -123,7 +123,7 @@ class DefaultPairingCoordinator(
             )
 
             _state.value = PairingState.WaitingForChallenge
-            val challengeMessage = connection.receiveHandshake(PAIRING_TIMEOUT_MS)
+            val challengeMessage = receivePairingHandshake(connection)
             if (challengeMessage.type != ProtocolMessageType.PAIRING_CHALLENGE.value) {
                 failAndClose("Компьютер отклонил привязку.", "PAIRING_ORDER")
                 return
@@ -156,6 +156,29 @@ class DefaultPairingCoordinator(
         } catch (error: Throwable) {
             failAndClose(error.message ?: "Не удалось выполнить привязку.", "PAIRING_FAILED")
         }
+    }
+
+    private suspend fun connectPairingSocket(payload: PairingQrPayload, hosts: List<String>): DeviceConnection? {
+        var lastError: Throwable? = null
+        for (host in hosts) {
+            val connection = connectionFactory()
+            active = ActivePairing(payload = payload, connection = connection)
+            try {
+                _state.value = PairingState.Connecting(payload.windowsDeviceName)
+                connection.connect(host, payload.port)
+                return connection
+            } catch (error: Throwable) {
+                lastError = error
+                connection.disconnect()
+                active = null
+            }
+        }
+
+        _state.value = PairingState.Failed(
+            lastError?.message ?: "РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ РїСЂРёРІСЏР·РєСѓ.",
+            "PAIRING_FAILED",
+        )
+        return null
     }
 
     override suspend fun confirmVerificationCode() {
@@ -199,7 +222,7 @@ class DefaultPairingCoordinator(
                 ),
             )
         )
-        val acceptedMessage = pairing.connection.receiveHandshake(PAIRING_TIMEOUT_MS)
+        val acceptedMessage = receivePairingHandshake(pairing.connection)
         if (acceptedMessage.type != ProtocolMessageType.PAIRING_ACCEPTED.value) {
             failAndClose("Компьютер не завершил привязку.", "ACCEPTED_EXPECTED")
             return
@@ -330,6 +353,16 @@ class DefaultPairingCoordinator(
     private suspend fun failAndClose(message: String, technicalCode: String) {
         terminateActive()
         _state.value = PairingState.Failed(message, technicalCode)
+    }
+
+    private suspend fun receivePairingHandshake(connection: DeviceConnection): ProtocolMessage {
+        return try {
+            connection.receiveHandshake(PAIRING_TIMEOUT_MS)
+        } catch (error: TimeoutCancellationException) {
+            throw ConnectionException.PairingTimeout(error)
+        } catch (error: ConnectionException.Timeout) {
+            throw ConnectionException.PairingTimeout(error)
+        }
     }
 
     private suspend fun terminateActive() {

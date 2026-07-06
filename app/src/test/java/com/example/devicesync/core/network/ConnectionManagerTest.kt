@@ -166,6 +166,62 @@ class ConnectionManagerTest {
         assertEquals(ConnectionState.Connected::class, manager.state.value::class)
     }
 
+    @Test
+    fun connect_addressesTriesNextAfterFirstConnectTimeout() = runTest {
+        val first = AddressAttemptConnection(
+            onConnectAttempt = { host, port -> throw ConnectionException.TcpConnectTimeout(host, port) },
+        )
+        val second = AddressAttemptConnection()
+        val attempts = ArrayDeque(listOf(first, second))
+        val manager = ConnectionManager(
+            connectionFactory = { attempts.removeFirst() },
+            androidDeviceId = "android-device",
+            androidDeviceName = "Android Test",
+        )
+
+        val connected = manager.connect(listOf("192.168.1.40", "192.168.1.41"), 53321)
+
+        assertEquals("windows-device-id", connected.deviceId)
+        assertEquals(listOf("192.168.1.40"), first.connectedHosts)
+        assertEquals(listOf("192.168.1.41"), second.connectedHosts)
+    }
+
+    @Test
+    fun connect_addressesExhaustedReturnsReadableTcpTimeout() = runTest {
+        val first = AddressAttemptConnection(
+            onConnectAttempt = { host, port -> throw ConnectionException.TcpConnectTimeout(host, port) },
+        )
+        val manager = ConnectionManager(
+            connectionFactory = { first },
+            androidDeviceId = "android-device",
+            androidDeviceName = "Android Test",
+        )
+
+        val error = runCatching { manager.connect(listOf("192.168.1.40"), 53321) }.exceptionOrNull()
+
+        assertTrue(error is ConnectionException.TcpConnectTimeout)
+        assertEquals(
+            "Не удалось подключиться к 192.168.1.40:53321.\nПроверьте Windows Firewall и подключение к одной сети.",
+            error?.message,
+        )
+    }
+
+    @Test
+    fun connect_handshakeTimeoutIsDistinctFromTcpConnectTimeout() = runTest {
+        val connection = AddressAttemptConnection(
+            responseProvider = { throw ConnectionException.Timeout() },
+        )
+        val manager = ConnectionManager(
+            connectionFactory = { connection },
+            androidDeviceId = "android-device",
+            androidDeviceName = "Android Test",
+        )
+
+        val error = runCatching { manager.connect("192.168.1.41", 53321) }.exceptionOrNull()
+
+        assertTrue(error is ConnectionException.HandshakeTimeout)
+    }
+
     private fun manager(fakeConnection: FakeDeviceConnection): ConnectionManager {
         return ConnectionManager(
             connectionFactory = { fakeConnection },
@@ -239,6 +295,38 @@ private class AuthDeviceConnection(private val windowsKeys: KeyPair) : DeviceCon
             payload = ProtocolSerializer.payloadToJson(AuthAcceptedPayload(status = "accepted")),
         ).also { assertEquals(sent.first().messageId, payload.helloMessageId) }
     }
+}
+
+private class AddressAttemptConnection(
+    private val onConnectAttempt: suspend (String, Int) -> Unit = { _, _ -> },
+    private val responseProvider: (ProtocolMessage) -> ProtocolMessage = { sentHello ->
+        helloAckMessage(correlationId = sentHello.messageId)
+    },
+) : DeviceConnection {
+    val connectedHosts = mutableListOf<String>()
+    private var sentHello: ProtocolMessage? = null
+    private var helloAckReturned = false
+
+    override suspend fun connect(host: String, port: Int) {
+        connectedHosts += host
+        onConnectAttempt(host, port)
+    }
+
+    override suspend fun send(message: ProtocolMessage) {
+        if (message.type == ProtocolMessageType.CONNECTION_HELLO.value) {
+            sentHello = message
+        }
+    }
+
+    override suspend fun receive(): ProtocolMessage {
+        if (helloAckReturned) {
+            CompletableDeferred<Unit>().await()
+        }
+        helloAckReturned = true
+        return responseProvider(sentHello ?: error("Hello was not sent"))
+    }
+
+    override suspend fun disconnect() = Unit
 }
 
 private class TestDeviceIdentityRepository : DeviceIdentityRepository {

@@ -5,6 +5,7 @@ import com.example.devicesync.core.data.DeviceRepository
 import com.example.devicesync.core.data.OutgoingMessageQueue
 import com.example.devicesync.core.data.PairedDevice
 import com.example.devicesync.core.data.ProcessedMessageRepository
+import com.example.devicesync.core.discovery.DiscoveryAddressSelector
 import com.example.devicesync.core.model.ConnectionStatus
 import com.example.devicesync.core.protocol.ConnectionClosePayload
 import com.example.devicesync.core.protocol.ConnectionHelloAckPayload
@@ -33,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -68,6 +70,7 @@ class ConnectionManager(
     private val heartbeatConfig: HeartbeatConfig = HeartbeatConfig(),
     private val ackConfig: AckConfig = AckConfig(),
     private val reconnectConfig: ReconnectConfig = ReconnectConfig(),
+    private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -97,6 +100,24 @@ class ConnectionManager(
 
     suspend fun connect(host: String, port: Int): ConnectionState.Connected {
         return connectManually(host, port)
+    }
+
+    suspend fun connect(hostAddresses: List<String>, port: Int): ConnectionState.Connected {
+        val orderedAddresses = addressSelector.orderedUsableAddresses(hostAddresses)
+        if (orderedAddresses.isEmpty()) {
+            throw ConnectionException.InvalidAddress()
+        }
+
+        var lastError: ConnectionException? = null
+        for (host in orderedAddresses) {
+            try {
+                return connectManually(host, port)
+            } catch (error: ConnectionException) {
+                lastError = error
+            }
+        }
+
+        throw lastError ?: ConnectionException.InvalidAddress()
     }
 
     suspend fun connectManually(host: String, port: Int): ConnectionState.Connected {
@@ -221,14 +242,14 @@ class ConnectionManager(
             activeConnection.send(hello)
             val connected = if (identityKeyProvider != null && trustedDeviceRepository != null) {
                 _state.value = ConnectionState.AuthenticatingWindows(host, port)
-                val challenge = activeConnection.receiveHandshake(AUTH_TIMEOUT_MS)
+                val challenge = receiveAuthHandshake(activeConnection)
                 val authContext = validateAuthChallenge(challenge, helloContext, host, port)
                 _state.value = ConnectionState.ProvingAndroidIdentity(host, port)
                 activeConnection.send(buildAuthResponse(authContext))
-                val acceptedMessage = activeConnection.receiveHandshake(AUTH_TIMEOUT_MS)
+                val acceptedMessage = receiveAuthHandshake(activeConnection)
                 validateAuthAccepted(acceptedMessage, authContext, host, port)
             } else {
-                val response = activeConnection.receiveHandshake(HELLO_ACK_TIMEOUT_MS)
+                val response = receiveHelloAck(activeConnection)
                 validateHelloAck(response, hello.messageId, host, port)
             }
             activeConnection.onHandshakeComplete()
@@ -712,6 +733,26 @@ class ConnectionManager(
             helloMessageId = helloContext.message.messageId,
             transcript = transcript,
         )
+    }
+
+    private suspend fun receiveHelloAck(activeConnection: DeviceConnection): ProtocolMessage {
+        return try {
+            activeConnection.receiveHandshake(HELLO_ACK_TIMEOUT_MS)
+        } catch (error: TimeoutCancellationException) {
+            throw ConnectionException.HandshakeTimeout(error)
+        } catch (error: ConnectionException.Timeout) {
+            throw ConnectionException.HandshakeTimeout(error)
+        }
+    }
+
+    private suspend fun receiveAuthHandshake(activeConnection: DeviceConnection): ProtocolMessage {
+        return try {
+            activeConnection.receiveHandshake(AUTH_TIMEOUT_MS)
+        } catch (error: TimeoutCancellationException) {
+            throw ConnectionException.AuthTimeout(error)
+        } catch (error: ConnectionException.Timeout) {
+            throw ConnectionException.AuthTimeout(error)
+        }
     }
 
     private suspend fun buildAuthResponse(context: AuthContext): ProtocolMessage {

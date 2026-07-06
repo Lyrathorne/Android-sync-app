@@ -16,6 +16,13 @@ class DiscoveryAddressSelectorTest {
     }
 
     @Test
+    fun select_prefersPrivateLanIpv4() {
+        val selected = selector.select(listOf("8.8.8.8", "192.168.1.25"))
+
+        assertEquals("192.168.1.25", selected)
+    }
+
+    @Test
     fun select_usesIpv6WhenIpv4Missing() {
         val selected = selector.select(listOf("fd00::1234"))
 

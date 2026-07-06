@@ -5,6 +5,7 @@ import com.example.devicesync.core.protocol.ProtocolFrameWriter
 import com.example.devicesync.core.protocol.ProtocolMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -41,6 +42,9 @@ class TcpDeviceConnection(
         } catch (error: CancellationException) {
             disconnect()
             throw error
+        } catch (error: SocketTimeoutException) {
+            disconnect()
+            throw ConnectionException.TcpConnectTimeout(host, port, error)
         } catch (error: Throwable) {
             disconnect()
             throw error.toConnectionException()
@@ -101,6 +105,7 @@ class TcpDeviceConnection(
 fun Throwable.toConnectionException(): ConnectionException {
     return when (this) {
         is ConnectionException -> this
+        is TimeoutCancellationException -> ConnectionException.Timeout(this)
         is SocketTimeoutException -> ConnectionException.Timeout(this)
         is ConnectException -> ConnectionException.ConnectionRefused(this)
         is UnknownHostException,
