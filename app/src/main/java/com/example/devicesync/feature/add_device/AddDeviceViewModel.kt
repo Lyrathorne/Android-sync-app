@@ -196,6 +196,15 @@ class AddDeviceViewModel(
                 is ConnectionState.Handshaking -> current.copy(
                     manualConnectionStatus = ManualConnectionStatus.Handshaking(state.host, state.port),
                 )
+                is ConnectionState.AuthenticatingWindows -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Handshaking(state.host, state.port),
+                )
+                is ConnectionState.ProvingAndroidIdentity -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Handshaking(state.host, state.port),
+                )
+                is ConnectionState.Authenticated -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Connected(state.deviceName),
+                )
                 is ConnectionState.Connected -> current.copy(
                     manualConnectionStatus = ManualConnectionStatus.Connected(state.deviceName),
                 )
@@ -207,6 +216,15 @@ class AddDeviceViewModel(
                 )
                 ConnectionState.NetworkUnavailable -> current.copy(
                     manualConnectionStatus = ManualConnectionStatus.Failed("Нет сети"),
+                )
+                is ConnectionState.IdentityChanged -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Failed("Ключ устройства изменился. Выполните привязку заново."),
+                )
+                ConnectionState.PairingRequired -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Failed("Компьютер ещё не привязан. Отсканируйте QR-код на компьютере."),
+                )
+                is ConnectionState.AuthenticationFailed -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Failed(state.message),
                 )
                 ConnectionState.Disconnected -> current
             }

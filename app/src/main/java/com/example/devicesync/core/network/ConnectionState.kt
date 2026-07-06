@@ -13,6 +13,21 @@ sealed interface ConnectionState {
         val port: Int,
     ) : ConnectionState
 
+    data class AuthenticatingWindows(
+        val host: String,
+        val port: Int,
+    ) : ConnectionState
+
+    data class ProvingAndroidIdentity(
+        val host: String,
+        val port: Int,
+    ) : ConnectionState
+
+    data class Authenticated(
+        val deviceId: String,
+        val deviceName: String,
+    ) : ConnectionState
+
     data class Connected(
         val deviceId: String,
         val deviceName: String,
@@ -37,6 +52,16 @@ sealed interface ConnectionState {
     data object NetworkUnavailable : ConnectionState
 
     data class Failed(
+        val message: String,
+    ) : ConnectionState
+
+    data class IdentityChanged(
+        val deviceId: String,
+    ) : ConnectionState
+
+    data object PairingRequired : ConnectionState
+
+    data class AuthenticationFailed(
         val message: String,
     ) : ConnectionState
 }

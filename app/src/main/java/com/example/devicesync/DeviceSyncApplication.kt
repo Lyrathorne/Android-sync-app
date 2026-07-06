@@ -11,6 +11,8 @@ import com.example.devicesync.core.database.DeviceSyncDatabase
 import com.example.devicesync.core.discovery.AndroidNsdDiscoveryService
 import com.example.devicesync.core.network.ConnectionManager
 import com.example.devicesync.core.network.NetworkMonitor
+import com.example.devicesync.core.security.AndroidKeystoreDeviceIdentityKeyProvider
+import com.example.devicesync.core.security.RoomTrustedDeviceRepository
 import com.example.devicesync.core.settings.DataStoreAppSettingsRepository
 import com.example.devicesync.core.settings.DataStoreDeviceIdentityRepository
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +44,8 @@ class DeviceSyncContainer(context: Context) {
     val deviceRepository = RoomDeviceRepository(database.deviceDao())
     val outgoingMessageQueue = RoomOutgoingMessageQueue(database.pendingMessageDao())
     val processedMessageRepository = RoomProcessedMessageRepository(database.processedMessageDao())
+    val trustedDeviceRepository = RoomTrustedDeviceRepository(database.trustedDeviceDao())
+    val identityKeyProvider = AndroidKeystoreDeviceIdentityKeyProvider()
     val networkMonitor = NetworkMonitor(context)
     val discoveryService = AndroidNsdDiscoveryService(context)
     val connectionManager = ConnectionManager(

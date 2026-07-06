@@ -1,4 +1,4 @@
-package com.example.devicesync.feature.device_details
+﻿package com.example.devicesync.feature.device_details
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -139,9 +139,15 @@ private fun ConnectionState.label(): String {
         ConnectionState.Disconnected -> "Не в сети"
         is ConnectionState.Connecting -> "Подключение"
         is ConnectionState.Handshaking -> "Проверка устройства"
+        is ConnectionState.AuthenticatingWindows -> "Проверка ключа компьютера"
+        is ConnectionState.ProvingAndroidIdentity -> "Подтверждение телефона"
+        is ConnectionState.Authenticated -> "Аутентифицировано"
         is ConnectionState.Connected -> "Подключено"
         is ConnectionState.Reconnecting -> "Переподключение: попытка $attempt"
         ConnectionState.NetworkUnavailable -> "Нет сети"
         is ConnectionState.Failed -> message
+        is ConnectionState.IdentityChanged -> "Ключ устройства изменился"
+        ConnectionState.PairingRequired -> "Требуется привязка"
+        is ConnectionState.AuthenticationFailed -> message
     }
 }
