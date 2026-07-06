@@ -8,6 +8,7 @@ import com.example.devicesync.core.data.RoomDeviceRepository
 import com.example.devicesync.core.data.RoomOutgoingMessageQueue
 import com.example.devicesync.core.data.RoomProcessedMessageRepository
 import com.example.devicesync.core.database.DeviceSyncDatabase
+import com.example.devicesync.core.database.DeviceSyncMigrations
 import com.example.devicesync.core.discovery.AndroidNsdDiscoveryService
 import com.example.devicesync.core.network.ConnectionManager
 import com.example.devicesync.core.network.NetworkMonitor
@@ -37,7 +38,9 @@ class DeviceSyncContainer(context: Context) {
         context,
         DeviceSyncDatabase::class.java,
         "devicesync.db",
-    ).build()
+    )
+        .addMigrations(DeviceSyncMigrations.MIGRATION_1_2)
+        .build()
 
     val identityRepository = DataStoreDeviceIdentityRepository(context.deviceSyncDataStore)
     val settingsRepository = DataStoreAppSettingsRepository(context.deviceSyncDataStore)
