@@ -24,7 +24,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -37,11 +36,11 @@ import com.example.devicesync.R
 import com.example.devicesync.core.discovery.DiscoveredDevice
 import com.example.devicesync.core.discovery.DiscoveryState
 import com.example.devicesync.ui.theme.DeviceSyncTheme
-import kotlinx.coroutines.launch
 
 @Composable
 fun AddDeviceRoute(
     onBackClick: () -> Unit,
+    onScanQrClick: () -> Unit,
     onConnected: (String) -> Unit,
     viewModel: AddDeviceViewModel = viewModel(),
 ) {
@@ -56,7 +55,7 @@ fun AddDeviceRoute(
         onStartSearchClick = viewModel::startSearch,
         onStopSearchClick = viewModel::stopSearch,
         onConnectDiscoveredClick = viewModel::connectDiscovered,
-        onQrClick = {},
+        onQrClick = onScanQrClick,
         onManualClick = viewModel::showManualForm,
         onIpChanged = viewModel::onIpChanged,
         onPortChanged = viewModel::onPortChanged,
@@ -80,9 +79,6 @@ fun AddDeviceScreen(
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
-    val featureLaterText = stringResource(R.string.feature_later)
-
     Scaffold(
         modifier = modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -122,10 +118,7 @@ fun AddDeviceScreen(
                 onConnectDiscoveredClick = onConnectDiscoveredClick,
             )
             OutlinedButton(
-                onClick = {
-                    onQrClick()
-                    scope.launch { snackbarHostState.showSnackbar(featureLaterText) }
-                },
+                onClick = onQrClick,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(stringResource(R.string.scan_qr))

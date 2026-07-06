@@ -13,6 +13,7 @@ import com.example.devicesync.core.discovery.AndroidNsdDiscoveryService
 import com.example.devicesync.core.network.ConnectionManager
 import com.example.devicesync.core.network.NetworkMonitor
 import com.example.devicesync.core.security.AndroidKeystoreDeviceIdentityKeyProvider
+import com.example.devicesync.core.security.DefaultPairingCoordinator
 import com.example.devicesync.core.security.RoomTrustedDeviceRepository
 import com.example.devicesync.core.settings.DataStoreAppSettingsRepository
 import com.example.devicesync.core.settings.DataStoreDeviceIdentityRepository
@@ -49,6 +50,12 @@ class DeviceSyncContainer(context: Context) {
     val processedMessageRepository = RoomProcessedMessageRepository(database.processedMessageDao())
     val trustedDeviceRepository = RoomTrustedDeviceRepository(database.trustedDeviceDao())
     val identityKeyProvider = AndroidKeystoreDeviceIdentityKeyProvider()
+    val pairingCoordinator = DefaultPairingCoordinator(
+        identityRepository = identityRepository,
+        identityKeyProvider = identityKeyProvider,
+        trustedDeviceRepository = trustedDeviceRepository,
+        scope = applicationScope,
+    )
     val networkMonitor = NetworkMonitor(context)
     val discoveryService = AndroidNsdDiscoveryService(context)
     val connectionManager = ConnectionManager(
@@ -59,6 +66,8 @@ class DeviceSyncContainer(context: Context) {
         processedMessageRepository = processedMessageRepository,
         settingsRepository = settingsRepository,
         networkMonitor = networkMonitor,
+        identityKeyProvider = identityKeyProvider,
+        trustedDeviceRepository = trustedDeviceRepository,
     )
 
     init {

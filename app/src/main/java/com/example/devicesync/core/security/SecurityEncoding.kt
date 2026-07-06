@@ -70,6 +70,73 @@ object TranscriptBuilder {
         windowsNonce,
     )
 
+    fun pairingConfirmation(
+        sessionId: String,
+        windowsDeviceId: String,
+        androidDeviceId: String,
+        windowsFingerprint: String,
+        androidFingerprint: String,
+        androidNonce: String,
+        windowsNonce: String,
+        verificationCode: String,
+    ): ByteArray = build(
+        "DeviceSyncPairingConfirmV1",
+        sessionId,
+        windowsDeviceId,
+        androidDeviceId,
+        windowsFingerprint,
+        androidFingerprint,
+        androidNonce,
+        windowsNonce,
+        verificationCode,
+    )
+
+    fun pairingAccepted(
+        sessionId: String,
+        windowsDeviceId: String,
+        androidDeviceId: String,
+        windowsFingerprint: String,
+        androidFingerprint: String,
+        androidNonce: String,
+        windowsNonce: String,
+        verificationCode: String,
+        pairedAtUtc: String,
+        permissions: List<String>,
+    ): ByteArray = build(
+        "DeviceSyncPairingAcceptedV1",
+        sessionId,
+        windowsDeviceId,
+        androidDeviceId,
+        windowsFingerprint,
+        androidFingerprint,
+        androidNonce,
+        windowsNonce,
+        verificationCode,
+        pairedAtUtc,
+        permissions.joinToString(","),
+    )
+
+    fun sessionAuth(
+        protocolVersion: Int,
+        androidDeviceId: String,
+        windowsDeviceId: String,
+        androidFingerprint: String,
+        windowsFingerprint: String,
+        clientNonce: String,
+        serverNonce: String,
+        helloMessageId: String,
+    ): ByteArray = build(
+        "DeviceSyncSessionAuthV1",
+        protocolVersion.toString(),
+        androidDeviceId,
+        windowsDeviceId,
+        androidFingerprint,
+        windowsFingerprint,
+        clientNonce,
+        serverNonce,
+        helloMessageId,
+    )
+
     fun build(vararg fields: String): ByteArray {
         val parts = fields.map { it.encodeToByteArray() }
         val totalSize = parts.sumOf { it.size + Int.SIZE_BYTES }

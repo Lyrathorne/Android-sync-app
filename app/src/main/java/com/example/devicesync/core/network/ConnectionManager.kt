@@ -9,6 +9,9 @@ import com.example.devicesync.core.model.ConnectionStatus
 import com.example.devicesync.core.protocol.ConnectionClosePayload
 import com.example.devicesync.core.protocol.ConnectionHelloAckPayload
 import com.example.devicesync.core.protocol.ConnectionHelloPayload
+import com.example.devicesync.core.protocol.AuthAcceptedPayload
+import com.example.devicesync.core.protocol.AuthChallengePayload
+import com.example.devicesync.core.protocol.AuthResponsePayload
 import com.example.devicesync.core.protocol.MessageAckPayload
 import com.example.devicesync.core.protocol.PingPayload
 import com.example.devicesync.core.protocol.PongPayload
@@ -16,6 +19,11 @@ import com.example.devicesync.core.protocol.ProtocolErrorPayload
 import com.example.devicesync.core.protocol.ProtocolMessage
 import com.example.devicesync.core.protocol.ProtocolMessageType
 import com.example.devicesync.core.protocol.ProtocolSerializer
+import com.example.devicesync.core.security.Base64Url
+import com.example.devicesync.core.security.DeviceIdentityKeyProvider
+import com.example.devicesync.core.security.SecurityEncoding
+import com.example.devicesync.core.security.TranscriptBuilder
+import com.example.devicesync.core.security.TrustedDeviceRepository
 import com.example.devicesync.core.settings.AppSettingsRepository
 import com.example.devicesync.core.settings.DeviceIdentityRepository
 import kotlinx.coroutines.CancellationException
@@ -39,6 +47,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
+import java.security.SecureRandom
 import java.time.Instant
 import java.util.UUID
 
@@ -54,6 +63,8 @@ class ConnectionManager(
     private val processedMessageRepository: ProcessedMessageRepository? = null,
     private val settingsRepository: AppSettingsRepository? = null,
     private val networkMonitor: NetworkMonitor? = null,
+    private val identityKeyProvider: DeviceIdentityKeyProvider? = null,
+    private val trustedDeviceRepository: TrustedDeviceRepository? = null,
     private val heartbeatConfig: HeartbeatConfig = HeartbeatConfig(),
     private val ackConfig: AckConfig = AckConfig(),
     private val reconnectConfig: ReconnectConfig = ReconnectConfig(),
@@ -82,6 +93,7 @@ class ConnectionManager(
     private var terminatedSessionId = 0L
     private val pendingAcks = mutableMapOf<String, ProtocolMessage>()
     private val ackRetryJobs = mutableMapOf<String, Job>()
+    private var sessionSecurityState: SessionSecurityState = SessionSecurityState.Unauthenticated
 
     suspend fun connect(host: String, port: Int): ConnectionState.Connected {
         return connectManually(host, port)
@@ -139,6 +151,38 @@ class ConnectionManager(
         settingsRepository?.setLastSelectedDeviceId(null)
     }
 
+    suspend fun revokeTrust(deviceId: String) {
+        manualDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        val wasActive = activeDevice?.id == deviceId || remoteDeviceId == deviceId
+        if (wasActive) {
+            terminateSession(SessionTerminationReason.ManualDisconnect, reconnectAllowed = false)
+        }
+        ackMutex.withLock {
+            val revokedMessageIds = pendingAcks
+                .filterValues { it.recipientDeviceId == deviceId }
+                .keys
+                .toSet()
+            revokedMessageIds.forEach { messageId ->
+                pendingAcks.remove(messageId)
+                ackRetryJobs.remove(messageId)?.cancel()
+            }
+        }
+        outgoingMessageQueue?.deleteForDevice(deviceId)
+        trustedDeviceRepository?.revoke(deviceId, Instant.now())
+        if (settingsRepository?.settings?.first()?.lastSelectedDeviceId == deviceId) {
+            settingsRepository.setLastSelectedDeviceId(null)
+        }
+        if (activeDevice?.id == deviceId) {
+            activeDevice = null
+        }
+        if (remoteDeviceId == deviceId) {
+            remoteDeviceId = null
+        }
+        _state.value = ConnectionState.PairingRequired
+    }
+
     suspend fun sendQueued(message: ProtocolMessage) {
         if (message.requiresAcknowledgement) {
             outgoingMessageQueue?.enqueue(message)
@@ -172,10 +216,21 @@ class ConnectionManager(
 
             _state.value = ConnectionState.Handshaking(host, port)
             NetworkLogger.info("Handshake started session=$currentSessionId")
-            val hello = buildHelloMessage()
+            val helloContext = buildHelloMessage()
+            val hello = helloContext.message
             activeConnection.send(hello)
-            val response = activeConnection.receiveHandshake(HELLO_ACK_TIMEOUT_MS)
-            val connected = validateHelloAck(response, hello.messageId, host, port)
+            val connected = if (identityKeyProvider != null && trustedDeviceRepository != null) {
+                _state.value = ConnectionState.AuthenticatingWindows(host, port)
+                val challenge = activeConnection.receiveHandshake(AUTH_TIMEOUT_MS)
+                val authContext = validateAuthChallenge(challenge, helloContext, host, port)
+                _state.value = ConnectionState.ProvingAndroidIdentity(host, port)
+                activeConnection.send(buildAuthResponse(authContext))
+                val acceptedMessage = activeConnection.receiveHandshake(AUTH_TIMEOUT_MS)
+                validateAuthAccepted(acceptedMessage, authContext, host, port)
+            } else {
+                val response = activeConnection.receiveHandshake(HELLO_ACK_TIMEOUT_MS)
+                validateHelloAck(response, hello.messageId, host, port)
+            }
             activeConnection.onHandshakeComplete()
 
             remoteDeviceId = connected.deviceId
@@ -184,6 +239,8 @@ class ConnectionManager(
             settingsRepository?.setLastSelectedDeviceId(connected.deviceId)
             reconnectJob?.cancel()
             reconnectJob = null
+            sessionSecurityState = SessionSecurityState.Authenticated
+            _state.value = ConnectionState.Authenticated(connected.deviceId, connected.deviceName)
             _state.value = connected.copy(reconnectAttempt = 0)
 
             startWriter(activeConnection, currentSessionId)
@@ -198,6 +255,19 @@ class ConnectionManager(
                 if (connection === activeConnection) connection = null
             }
             throw error
+        } catch (error: SecurityAuthException) {
+            NetworkLogger.error("Authentication security error: ${error.code}", error)
+            withContext(NonCancellable) {
+                activeConnection.disconnect()
+                if (connection === activeConnection) connection = null
+            }
+            _state.value = when (error.code) {
+                "PAIRING_REQUIRED" -> ConnectionState.PairingRequired
+                "IDENTITY_KEY_CHANGED" -> ConnectionState.IdentityChanged(error.deviceId.orEmpty())
+                "TRUST_REVOKED" -> ConnectionState.TrustRevoked
+                else -> ConnectionState.AuthenticationFailed(error.code)
+            }
+            throw ConnectionException.InvalidMessage(error.code, error)
         } catch (error: Throwable) {
             val connectionError = error.toConnectionException()
             NetworkLogger.error("Connection failed: ${connectionError::class.simpleName}", connectionError)
@@ -262,6 +332,10 @@ class ConnectionManager(
     }
 
     private fun startHeartbeat(recipientDeviceId: String, ownerSessionId: Long) {
+        if (sessionSecurityState != SessionSecurityState.Authenticated) {
+            NetworkLogger.info("Heartbeat suppressed before authentication session=$ownerSessionId")
+            return
+        }
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             NetworkLogger.info("Heartbeat started session=$ownerSessionId")
@@ -355,6 +429,7 @@ class ConnectionManager(
             NetworkLogger.info("Pong received sequence=${payload.sequence}")
             waitingPong.deferred.complete(true)
             pendingPong = null
+            sessionSecurityState = SessionSecurityState.Unauthenticated
             updateConnectedDiagnostics(lastPongAtUtc = payload.receivedAtUtc, missed = 0)
         }
     }
@@ -559,14 +634,19 @@ class ConnectionManager(
         }
     }
 
-    private suspend fun buildHelloMessage(): ProtocolMessage {
+    private suspend fun buildHelloMessage(): HelloContext {
+        val fingerprint = identityKeyProvider?.getPublicKeyFingerprint()
+        val clientNonce = Base64Url.encode(ByteArray(32).also { SecureRandom().nextBytes(it) })
         val payload = ConnectionHelloPayload(
             deviceName = getAndroidDeviceName(),
             appVersion = appVersion,
             protocolVersion = PROTOCOL_VERSION,
             capabilities = SupportedCapabilities.values,
+            identityFingerprint = fingerprint,
+            clientNonce = clientNonce,
+            authVersion = if (fingerprint != null) 1 else 0,
         )
-        return ProtocolMessage(
+        val message = ProtocolMessage(
             protocolVersion = PROTOCOL_VERSION,
             messageId = UUID.randomUUID().toString(),
             type = ProtocolMessageType.CONNECTION_HELLO.value,
@@ -574,6 +654,108 @@ class ConnectionManager(
             timestampUtc = Instant.now().toString(),
             requiresAcknowledgement = true,
             payload = ProtocolSerializer.payloadToJson(payload),
+        )
+        return HelloContext(message, fingerprint.orEmpty(), clientNonce)
+    }
+
+    private suspend fun validateAuthChallenge(
+        response: ProtocolMessage,
+        helloContext: HelloContext,
+        host: String,
+        port: Int,
+    ): AuthContext {
+        if (response.type == ProtocolMessageType.ERROR_PROTOCOL.value) {
+            val payload = ProtocolSerializer.decodePayload<ProtocolErrorPayload>(response.payload)
+            throw SecurityAuthException(payload.code, response.senderDeviceId)
+        }
+        if (response.type != ProtocolMessageType.AUTH_CHALLENGE.value || response.correlationId != helloContext.message.messageId) {
+            throw ConnectionException.InvalidMessage()
+        }
+        if (Base64Url.decode(helloContext.clientNonce).size != 32) {
+            throw ConnectionException.InvalidMessage()
+        }
+        val payload = ProtocolSerializer.decodePayload<AuthChallengePayload>(response.payload)
+        if (payload.helloMessageId != helloContext.message.messageId || Base64Url.decode(payload.serverNonce).size != 32) {
+            throw ConnectionException.InvalidMessage()
+        }
+        val trusted = trustedDeviceRepository?.getTrustedDevice(response.senderDeviceId)
+            ?: throw SecurityAuthException("PAIRING_REQUIRED", response.senderDeviceId)
+        if (trusted.revokedAt != null) {
+            throw SecurityAuthException("TRUST_REVOKED", response.senderDeviceId)
+        }
+        if (trusted.identityFingerprint != payload.windowsIdentityFingerprint) {
+            throw SecurityAuthException("IDENTITY_KEY_CHANGED", response.senderDeviceId)
+        }
+        val transcript = TranscriptBuilder.sessionAuth(
+            protocolVersion = PROTOCOL_VERSION,
+            androidDeviceId = getAndroidDeviceId(),
+            windowsDeviceId = response.senderDeviceId,
+            androidFingerprint = helloContext.androidFingerprint,
+            windowsFingerprint = payload.windowsIdentityFingerprint,
+            clientNonce = helloContext.clientNonce,
+            serverNonce = payload.serverNonce,
+            helloMessageId = helloContext.message.messageId,
+        )
+        val signatureOk = identityKeyProvider?.verify(
+            publicKey = Base64Url.decode(trusted.identityPublicKey),
+            data = transcript,
+            signature = Base64Url.decode(payload.serverSignature),
+        ) == true
+        if (!signatureOk) {
+            throw SecurityAuthException("AUTH_SIGNATURE_INVALID", response.senderDeviceId)
+        }
+        return AuthContext(
+            windowsDeviceId = response.senderDeviceId,
+            windowsDeviceName = trusted.deviceName,
+            host = host,
+            port = port,
+            helloMessageId = helloContext.message.messageId,
+            transcript = transcript,
+        )
+    }
+
+    private suspend fun buildAuthResponse(context: AuthContext): ProtocolMessage {
+        val signature = identityKeyProvider?.sign(context.transcript) ?: throw ConnectionException.InvalidMessage()
+        return ProtocolMessage(
+            protocolVersion = PROTOCOL_VERSION,
+            messageId = UUID.randomUUID().toString(),
+            type = ProtocolMessageType.AUTH_RESPONSE.value,
+            senderDeviceId = getAndroidDeviceId(),
+            recipientDeviceId = context.windowsDeviceId,
+            timestampUtc = Instant.now().toString(),
+            payload = ProtocolSerializer.payloadToJson(
+                AuthResponsePayload(
+                    helloMessageId = context.helloMessageId,
+                    clientSignature = Base64Url.encode(signature),
+                )
+            ),
+        )
+    }
+
+    private suspend fun validateAuthAccepted(
+        message: ProtocolMessage,
+        context: AuthContext,
+        host: String,
+        port: Int,
+    ): ConnectionState.Connected {
+        if (message.type == ProtocolMessageType.AUTH_REJECTED.value) {
+            throw SecurityAuthException("AUTH_REJECTED", context.windowsDeviceId)
+        }
+        if (message.type != ProtocolMessageType.AUTH_ACCEPTED.value || message.senderDeviceId != context.windowsDeviceId) {
+            throw ConnectionException.InvalidMessage()
+        }
+        val payload = ProtocolSerializer.decodePayload<AuthAcceptedPayload>(message.payload)
+        if (payload.status != "accepted") {
+            throw ConnectionException.InvalidMessage()
+        }
+        trustedDeviceRepository?.updateLastVerifiedAt(context.windowsDeviceId, Instant.now())
+        return ConnectionState.Connected(
+            deviceId = context.windowsDeviceId,
+            deviceName = context.windowsDeviceName,
+            host = host,
+            port = port,
+            acceptedProtocolVersion = PROTOCOL_VERSION,
+            capabilities = SupportedCapabilities.values,
         )
     }
 
@@ -709,6 +891,7 @@ class ConnectionManager(
 
     private companion object {
         const val HELLO_ACK_TIMEOUT_MS = 8_000L
+        const val AUTH_TIMEOUT_MS = 8_000L
     }
 }
 
@@ -745,6 +928,31 @@ private data class PendingPong(
     val sequence: Long,
     val deferred: CompletableDeferred<Boolean>,
 )
+
+private data class HelloContext(
+    val message: ProtocolMessage,
+    val androidFingerprint: String,
+    val clientNonce: String,
+)
+
+private data class AuthContext(
+    val windowsDeviceId: String,
+    val windowsDeviceName: String,
+    val host: String,
+    val port: Int,
+    val helloMessageId: String,
+    val transcript: ByteArray,
+)
+
+private enum class SessionSecurityState {
+    Unauthenticated,
+    Authenticated,
+}
+
+private class SecurityAuthException(
+    val code: String,
+    val deviceId: String? = null,
+) : Exception(code)
 
 private fun ConnectionException.isRecoverable(): Boolean {
     return when (this) {

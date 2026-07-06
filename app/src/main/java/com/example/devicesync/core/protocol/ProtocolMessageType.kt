@@ -14,6 +14,7 @@ enum class ProtocolMessageType(val value: String) {
     PAIRING_ACCEPTED("pairing.accepted"),
     PAIRING_REJECTED("pairing.rejected"),
     PAIRING_CANCEL("pairing.cancel"),
+    PAIRING_COMPLETE_ACK("pairing.complete_ack"),
     AUTH_CHALLENGE("auth.challenge"),
     AUTH_RESPONSE("auth.response"),
     AUTH_ACCEPTED("auth.accepted"),

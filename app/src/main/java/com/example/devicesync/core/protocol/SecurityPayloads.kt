@@ -22,26 +22,46 @@ data class PairingChallengePayload(
     val windowsIdentityPublicKey: String,
     val windowsIdentityFingerprint: String,
     val windowsNonce: String,
+    val androidNonce: String,
     val proof: String,
 )
 
 @Serializable
 data class PairingConfirmPayload(
     val sessionId: String,
-    val deviceId: String,
-    val signature: String,
+    val confirmed: Boolean = true,
+    val androidSignature: String,
+)
+
+@Serializable
+data class PairingAcceptedPayload(
+    val sessionId: String,
+    val windowsSignature: String,
+    val pairedAtUtc: String,
+    val permissions: List<String>,
+)
+
+@Serializable
+data class PairingCompleteAckPayload(
+    val sessionId: String,
+    val status: String,
 )
 
 @Serializable
 data class AuthChallengePayload(
     val serverNonce: String,
+    val windowsIdentityFingerprint: String,
     val serverSignature: String,
-    val serverIdentityFingerprint: String,
+    val helloMessageId: String,
 )
 
 @Serializable
 data class AuthResponsePayload(
-    val clientNonce: String,
+    val helloMessageId: String,
     val clientSignature: String,
-    val clientIdentityFingerprint: String,
+)
+
+@Serializable
+data class AuthAcceptedPayload(
+    val status: String,
 )

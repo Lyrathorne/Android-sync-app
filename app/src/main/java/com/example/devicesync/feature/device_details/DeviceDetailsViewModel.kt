@@ -82,14 +82,15 @@ class DeviceDetailsViewModel(
         if (currentDeviceId != null) {
             if (deviceRepository != null) {
                 viewModelScope.launch {
-                    connectionManager.disconnectDevice(currentDeviceId)
+                    connectionManager.revokeTrust(currentDeviceId)
                     deviceRepository.removeDevice(currentDeviceId)
+                    _uiState.update { it.copy(showDeleteDialog = false, isDeleted = true) }
                 }
             } else {
                 deviceStore.removeDevice(currentDeviceId)
+                _uiState.update { it.copy(showDeleteDialog = false, isDeleted = true) }
             }
         }
-        _uiState.update { it.copy(showDeleteDialog = false, isDeleted = true) }
     }
 
     fun disconnect() {
@@ -148,6 +149,7 @@ private fun ConnectionState.label(): String {
         is ConnectionState.Failed -> message
         is ConnectionState.IdentityChanged -> "Ключ устройства изменился"
         ConnectionState.PairingRequired -> "Требуется привязка"
+        ConnectionState.TrustRevoked -> "Привязка отозвана"
         is ConnectionState.AuthenticationFailed -> message
     }
 }

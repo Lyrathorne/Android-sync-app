@@ -10,4 +10,5 @@ interface OutgoingMessageQueue {
     suspend fun markSent(messageId: String)
     suspend fun markAcknowledged(messageId: String)
     suspend fun markFailed(messageId: String, reason: String)
+    suspend fun deleteForDevice(deviceId: String)
 }

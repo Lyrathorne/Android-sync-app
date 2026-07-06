@@ -27,4 +27,7 @@ interface PendingMessageDao {
 
     @Query("UPDATE pending_messages SET status = :status WHERE message_id = :messageId")
     suspend fun updateStatus(messageId: String, status: String)
+
+    @Query("DELETE FROM pending_messages WHERE recipient_device_id = :deviceId")
+    suspend fun deleteForDevice(deviceId: String)
 }

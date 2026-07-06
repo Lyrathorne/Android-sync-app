@@ -223,6 +223,9 @@ class AddDeviceViewModel(
                 ConnectionState.PairingRequired -> current.copy(
                     manualConnectionStatus = ManualConnectionStatus.Failed("Компьютер ещё не привязан. Отсканируйте QR-код на компьютере."),
                 )
+                ConnectionState.TrustRevoked -> current.copy(
+                    manualConnectionStatus = ManualConnectionStatus.Failed("Привязка к компьютеру отозвана. Выполните привязку заново."),
+                )
                 is ConnectionState.AuthenticationFailed -> current.copy(
                     manualConnectionStatus = ManualConnectionStatus.Failed(state.message),
                 )

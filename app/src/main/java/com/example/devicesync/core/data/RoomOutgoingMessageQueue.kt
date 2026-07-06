@@ -48,6 +48,10 @@ class RoomOutgoingMessageQueue(
     override suspend fun markFailed(messageId: String, reason: String) {
         pendingMessageDao.updateStatus(messageId, PendingMessageStatus.FAILED.name)
     }
+
+    override suspend fun deleteForDevice(deviceId: String) {
+        pendingMessageDao.deleteForDevice(deviceId)
+    }
 }
 
 private fun PendingMessageEntity.toPendingMessage(): PendingMessage {

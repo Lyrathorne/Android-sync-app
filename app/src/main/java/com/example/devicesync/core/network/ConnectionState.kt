@@ -61,6 +61,8 @@ sealed interface ConnectionState {
 
     data object PairingRequired : ConnectionState
 
+    data object TrustRevoked : ConnectionState
+
     data class AuthenticationFailed(
         val message: String,
     ) : ConnectionState

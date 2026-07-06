@@ -1,8 +1,13 @@
 package com.example.devicesync.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material3.Text
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -12,12 +17,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.devicesync.DeviceSyncApplication
 import com.example.devicesync.feature.add_device.AddDeviceRoute
 import com.example.devicesync.feature.add_device.AddDeviceViewModel
+import com.example.devicesync.feature.add_device.PairingVerificationRoute
+import com.example.devicesync.feature.add_device.ScanPairingQrScreen
 import com.example.devicesync.feature.device_details.DeviceDetailsRoute
 import com.example.devicesync.feature.device_details.DeviceDetailsViewModel
 import com.example.devicesync.feature.devices.DevicesRoute
 import com.example.devicesync.feature.devices.DevicesViewModel
 import com.example.devicesync.feature.settings.SettingsRoute
 import com.example.devicesync.feature.settings.SettingsViewModel
+import com.example.devicesync.core.security.PairingQrParser
+import kotlinx.coroutines.launch
 
 @Composable
 fun DeviceSyncNavHost() {
@@ -55,12 +64,39 @@ fun DeviceSyncNavHost() {
             )
             AddDeviceRoute(
                 onBackClick = navController::popBackStack,
+                onScanQrClick = { navController.navigate(AppDestination.ScanPairingQr.route) },
                 onConnected = { deviceId ->
                     navController.navigate(AppDestination.DeviceDetails.createRoute(deviceId)) {
                         popUpTo(AppDestination.Devices.route)
                     }
                 },
                 viewModel = addDeviceViewModel,
+            )
+        }
+        composable(AppDestination.ScanPairingQr.route) {
+            val parser = remember { PairingQrParser() }
+            val scope = rememberCoroutineScope()
+            var errorText by remember { mutableStateOf<String?>(null) }
+            ScanPairingQrScreen(
+                onQrScanned = { raw ->
+                    errorText = null
+                    parser.parse(raw)
+                        .onSuccess { payload ->
+                            scope.launch { container.pairingCoordinator.startPairing(payload) }
+                            navController.navigate(AppDestination.PairingVerification.route)
+                        }
+                        .onFailure { error ->
+                            errorText = error.message ?: "QR-код не распознан."
+                        }
+                },
+                onClose = navController::popBackStack,
+            )
+            errorText?.let { Text(it) }
+        }
+        composable(AppDestination.PairingVerification.route) {
+            PairingVerificationRoute(
+                coordinator = container.pairingCoordinator,
+                onBackClick = navController::popBackStack,
             )
         }
         composable(AppDestination.Settings.route) {
