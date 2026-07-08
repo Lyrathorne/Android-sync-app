@@ -43,9 +43,13 @@ class PairingCoordinatorTest {
         coordinator.startPairing(qrPayload(windowsKeys))
         coordinator.confirmVerificationCode()
 
+        assertEquals(ProtocolMessageType.PAIRING_REQUEST.value, connection.sent.first().type)
         assertNotNull(trusted.saved)
         assertEquals("windows-test", trusted.saved?.deviceId)
         assertTrue(connection.sent.any { it.type == ProtocolMessageType.PAIRING_COMPLETE_ACK.value })
+        val completed = coordinator.state.value as PairingState.Completed
+        assertEquals(listOf("192.168.1.45"), completed.hostAddresses)
+        assertEquals(54321, completed.port)
     }
 
     @Test

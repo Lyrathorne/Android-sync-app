@@ -42,7 +42,11 @@ sealed interface PairingState {
     ) : PairingState
     data object WaitingForWindowsConfirmation : PairingState
     data object SavingTrust : PairingState
-    data class Completed(val trustedDeviceId: String) : PairingState
+    data class Completed(
+        val trustedDeviceId: String,
+        val hostAddresses: List<String>,
+        val port: Int,
+    ) : PairingState
     data class Failed(val userMessage: String, val technicalCode: String? = null) : PairingState
     data object Cancelled : PairingState
     data object Expired : PairingState
@@ -263,7 +267,11 @@ class DefaultPairingCoordinator(
             )
         )
         terminateActive()
-        _state.value = PairingState.Completed(pairing.payload.windowsDeviceId)
+        _state.value = PairingState.Completed(
+            trustedDeviceId = pairing.payload.windowsDeviceId,
+            hostAddresses = pairing.payload.hostAddresses,
+            port = pairing.payload.port,
+        )
     }
 
     override suspend fun rejectVerificationCode() {

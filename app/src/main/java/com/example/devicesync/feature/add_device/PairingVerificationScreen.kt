@@ -14,6 +14,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -21,6 +22,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.devicesync.core.network.ConnectionManager
+import com.example.devicesync.core.network.ConnectionState
 import com.example.devicesync.core.security.PairingCoordinator
 import com.example.devicesync.core.security.PairingState
 import kotlinx.coroutines.launch
@@ -28,13 +31,30 @@ import kotlinx.coroutines.launch
 @Composable
 fun PairingVerificationRoute(
     coordinator: PairingCoordinator,
+    connectionManager: ConnectionManager,
     onBackClick: () -> Unit,
+    onConnected: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by coordinator.state.collectAsStateWithLifecycle()
+    val connectionState by connectionManager.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(state) {
+        val completed = state as? PairingState.Completed ?: return@LaunchedEffect
+        runCatching {
+            connectionManager.connect(completed.hostAddresses, completed.port)
+        }
+    }
+
+    LaunchedEffect(connectionState) {
+        val connected = connectionState as? ConnectionState.Connected ?: return@LaunchedEffect
+        onConnected(connected.deviceId)
+    }
+
     PairingVerificationScreen(
         state = state,
+        connectionState = connectionState,
         onConfirmClick = { scope.launch { coordinator.confirmVerificationCode() } },
         onRejectClick = { scope.launch { coordinator.rejectVerificationCode() } },
         onBackClick = onBackClick,
@@ -45,6 +65,7 @@ fun PairingVerificationRoute(
 @Composable
 fun PairingVerificationScreen(
     state: PairingState,
+    connectionState: ConnectionState = ConnectionState.Disconnected,
     onConfirmClick: () -> Unit,
     onRejectClick: () -> Unit,
     onBackClick: () -> Unit,
@@ -78,7 +99,7 @@ fun PairingVerificationScreen(
                 is PairingState.Connecting -> ProgressText("Подключение к ${state.windowsDeviceName}...")
                 PairingState.SendingRequest -> ProgressText("Отправка запроса привязки...")
                 PairingState.WaitingForChallenge -> ProgressText("Ожидание проверки компьютера...")
-                PairingState.VerifyingChallenge -> ProgressText("Проверка кода безопасности...")
+                PairingState.VerifyingChallenge -> ProgressText("Проверка ключа...")
                 is PairingState.WaitingForUserConfirmation -> VerificationContent(
                     state = state,
                     onConfirmClick = onConfirmClick,
@@ -86,10 +107,7 @@ fun PairingVerificationScreen(
                 )
                 PairingState.WaitingForWindowsConfirmation -> ProgressText("Ожидание подтверждения на компьютере...")
                 PairingState.SavingTrust -> ProgressText("Сохранение доверенного устройства...")
-                is PairingState.Completed -> Text(
-                    text = "Привязка завершена: ${state.trustedDeviceId.shortId()}",
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                is PairingState.Completed -> CompletedContent(connectionState)
                 is PairingState.Failed -> Text(
                     text = state.userMessage,
                     color = MaterialTheme.colorScheme.error,
@@ -109,6 +127,29 @@ private fun ProgressText(text: String) {
     ) {
         CircularProgressIndicator()
         Text(text)
+    }
+}
+
+@Composable
+private fun CompletedContent(connectionState: ConnectionState) {
+    when (connectionState) {
+        is ConnectionState.Connecting,
+        is ConnectionState.Handshaking,
+        is ConnectionState.AuthenticatingWindows,
+        is ConnectionState.ProvingAndroidIdentity -> ProgressText("Подключение к компьютеру...")
+        is ConnectionState.Connected -> Text(
+            text = "Connected",
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is ConnectionState.Failed -> Text(
+            text = connectionState.message,
+            color = MaterialTheme.colorScheme.error,
+        )
+        ConnectionState.PairingRequired -> Text(
+            text = "Компьютер ещё не привязан. Отсканируйте QR-код.",
+            color = MaterialTheme.colorScheme.error,
+        )
+        else -> ProgressText("Подключение к компьютеру...")
     }
 }
 

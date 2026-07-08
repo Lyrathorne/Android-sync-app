@@ -47,7 +47,7 @@ import java.util.concurrent.Executors
 
 @Composable
 fun ScanPairingQrScreen(
-    onQrScanned: (String) -> Unit,
+    onQrScanned: (String) -> Boolean,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -93,7 +93,7 @@ fun ScanPairingQrScreen(
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
 private fun QrCameraPreview(
-    onQrScanned: (String) -> Unit,
+    onQrScanned: (String) -> Boolean,
     onClose: () -> Unit,
     modifier: Modifier,
 ) {
@@ -144,8 +144,7 @@ private fun QrCameraPreview(
                                         .addOnSuccessListener { barcodes ->
                                             val raw = barcodes.firstOrNull { it.rawValue != null }?.rawValue
                                             if (raw != null && !consumed) {
-                                                consumed = true
-                                                onQrScanned(raw)
+                                                consumed = onQrScanned(raw)
                                             }
                                         }
                                         .addOnCompleteListener { proxy.close() }
