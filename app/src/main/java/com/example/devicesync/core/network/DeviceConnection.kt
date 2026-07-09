@@ -6,6 +6,7 @@ import kotlinx.coroutines.withTimeout
 interface DeviceConnection {
     suspend fun connect(host: String, port: Int)
     suspend fun onHandshakeComplete() = Unit
+    suspend fun setReadTimeout(timeoutMs: Int) = Unit
     suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage = withTimeout(timeoutMs) {
         receive()
     }

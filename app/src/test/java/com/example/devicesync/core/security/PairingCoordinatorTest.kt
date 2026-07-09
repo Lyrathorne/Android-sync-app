@@ -1,6 +1,7 @@
 package com.example.devicesync.core.security
 
 import com.example.devicesync.core.network.DeviceConnection
+import com.example.devicesync.core.network.ConnectionException
 import com.example.devicesync.core.protocol.PairingAcceptedPayload
 import com.example.devicesync.core.protocol.PairingChallengePayload
 import com.example.devicesync.core.protocol.PairingCompleteAckPayload
@@ -74,14 +75,113 @@ class PairingCoordinatorTest {
         assertTrue(coordinator.state.value is PairingState.Failed)
     }
 
-    private class ScriptedPairingConnection(
+    @Test
+    fun challengeTimeoutMovesToFailed() = runTest {
+        val windowsKeys = ecKeyPair()
+        val connection = FailingReceiveConnection(ConnectionException.Timeout())
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connection })
+
+        coordinator.startPairing(qrPayload(windowsKeys))
+
+        val state = coordinator.state.value as PairingState.Failed
+        assertEquals("PAIRING_CHALLENGE_TIMEOUT", state.technicalCode)
+        assertEquals(ProtocolMessageType.PAIRING_REQUEST.value, connection.sent.first().type)
+    }
+
+    @Test
+    fun pairingRejectedMovesToFailed() = runTest {
+        val windowsKeys = ecKeyPair()
+        val connection = FixedResponseConnection(ProtocolMessageType.PAIRING_REJECTED.value)
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connection })
+
+        coordinator.startPairing(qrPayload(windowsKeys))
+
+        val state = coordinator.state.value as PairingState.Failed
+        assertEquals("PAIRING_PROTOCOL_ERROR", state.technicalCode)
+    }
+
+    @Test
+    fun eofMovesToFailed() = runTest {
+        val windowsKeys = ecKeyPair()
+        val connection = FailingReceiveConnection(ConnectionException.ConnectionClosed())
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connection })
+
+        coordinator.startPairing(qrPayload(windowsKeys))
+
+        val state = coordinator.state.value as PairingState.Failed
+        assertEquals("PAIRING_CONNECTION_CLOSED", state.technicalCode)
+    }
+
+    @Test
+    fun firstAddressTimeoutThenSecondAddressSucceeds() = runTest {
+        val windowsKeys = ecKeyPair()
+        val first = ConnectFailConnection(ConnectionException.TcpConnectTimeout("192.168.1.44", 54321))
+        val second = ScriptedPairingConnection(windowsKeys)
+        val connections = ArrayDeque<DeviceConnection>(listOf(first, second))
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connections.removeFirst() })
+
+        coordinator.startPairing(qrPayload(windowsKeys, hostAddresses = listOf("192.168.1.44", "192.168.1.45")))
+
+        assertTrue(first.connectAttempted)
+        assertTrue(second.connectAttempted)
+        assertTrue(coordinator.state.value is PairingState.WaitingForUserConfirmation)
+    }
+
+    @Test
+    fun allAddressesFailMovesToFailedWithoutSendingRequest() = runTest {
+        val windowsKeys = ecKeyPair()
+        val first = ConnectFailConnection(ConnectionException.TcpConnectTimeout("192.168.1.44", 54321))
+        val second = ConnectFailConnection(ConnectionException.ConnectionRefused())
+        val connections = ArrayDeque<DeviceConnection>(listOf(first, second))
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connections.removeFirst() })
+
+        coordinator.startPairing(qrPayload(windowsKeys, hostAddresses = listOf("192.168.1.44", "192.168.1.45")))
+
+        val state = coordinator.state.value as PairingState.Failed
+        assertEquals("TCP_CONNECTION_REFUSED", state.technicalCode)
+        assertEquals(0, first.sentCount + second.sentCount)
+    }
+
+    @Test
+    fun secondAddressSuccessStopsFurtherAttempts() = runTest {
+        val windowsKeys = ecKeyPair()
+        val first = ConnectFailConnection(ConnectionException.TcpConnectTimeout("192.168.1.44", 54321))
+        val second = ScriptedPairingConnection(windowsKeys)
+        val third = ScriptedPairingConnection(windowsKeys)
+        val connections = ArrayDeque<DeviceConnection>(listOf(first, second, third))
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connections.removeFirst() })
+
+        coordinator.startPairing(qrPayload(windowsKeys, hostAddresses = listOf("192.168.1.44", "192.168.1.45", "192.168.1.46")))
+
+        assertTrue(second.connectAttempted)
+        assertTrue(!third.connectAttempted)
+    }
+
+    @Test
+    fun stateIsWaitingForChallengeAfterRequestIsSent() = runTest {
+        val windowsKeys = ecKeyPair()
+        lateinit var coordinator: DefaultPairingCoordinator
+        val connection = InspectingReceiveConnection(windowsKeys) {
+            assertTrue(coordinator.state.value is PairingState.WaitingForChallenge)
+        }
+        coordinator = coordinator(windowsKeys, connectionFactory = { connection })
+
+        coordinator.startPairing(qrPayload(windowsKeys))
+
+        assertTrue(coordinator.state.value is PairingState.WaitingForUserConfirmation)
+    }
+
+    private open class ScriptedPairingConnection(
         private val windowsKeys: KeyPair,
         private val corruptAcceptedSignature: Boolean = false,
     ) : DeviceConnection {
         val sent = mutableListOf<ProtocolMessage>()
+        var connectAttempted = false
         private val windowsNonce = Base64Url.encode(ByteArray(32) { 7 })
 
-        override suspend fun connect(host: String, port: Int) = Unit
+        override suspend fun connect(host: String, port: Int) {
+            connectAttempted = true
+        }
 
         override suspend fun send(message: ProtocolMessage) {
             sent += message
@@ -91,7 +191,7 @@ class PairingCoordinatorTest {
             error("receiveHandshake is used in pairing tests")
         }
 
-        override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage {
+        override open suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage {
             val last = sent.last()
             return when (last.type) {
                 ProtocolMessageType.PAIRING_REQUEST.value -> challenge(last)
@@ -185,6 +285,65 @@ class PairingCoordinatorTest {
         }
     }
 
+    private class FailingReceiveConnection(
+        private val failure: Throwable,
+    ) : DeviceConnection {
+        val sent = mutableListOf<ProtocolMessage>()
+        override suspend fun connect(host: String, port: Int) = Unit
+        override suspend fun send(message: ProtocolMessage) {
+            sent += message
+        }
+        override suspend fun receive(): ProtocolMessage = throw failure
+        override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage = throw failure
+        override suspend fun disconnect() = Unit
+    }
+
+    private class FixedResponseConnection(
+        private val responseType: String,
+    ) : DeviceConnection {
+        override suspend fun connect(host: String, port: Int) = Unit
+        override suspend fun send(message: ProtocolMessage) = Unit
+        override suspend fun receive(): ProtocolMessage = response()
+        override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage = response()
+        override suspend fun disconnect() = Unit
+
+        private fun response() = ProtocolMessage(
+            protocolVersion = 1,
+            messageId = "response-1",
+            type = responseType,
+            senderDeviceId = "windows-test",
+            recipientDeviceId = "android-test",
+            timestampUtc = "2026-07-06T12:00:01Z",
+            payload = ProtocolSerializer.payloadToJson(mapOf("code" to "TEST")),
+        )
+    }
+
+    private class ConnectFailConnection(
+        private val failure: Throwable,
+    ) : DeviceConnection {
+        var connectAttempted = false
+        var sentCount = 0
+        override suspend fun connect(host: String, port: Int) {
+            connectAttempted = true
+            throw failure
+        }
+        override suspend fun send(message: ProtocolMessage) {
+            sentCount++
+        }
+        override suspend fun receive(): ProtocolMessage = error("not connected")
+        override suspend fun disconnect() = Unit
+    }
+
+    private class InspectingReceiveConnection(
+        windowsKeys: KeyPair,
+        private val onReceive: () -> Unit,
+    ) : ScriptedPairingConnection(windowsKeys) {
+        override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage {
+            onReceive()
+            return super.receiveHandshake(timeoutMs)
+        }
+    }
+
     private class FakeIdentityRepository : DeviceIdentityRepository {
         override suspend fun getOrCreateDeviceId(): String = "android-test"
         override suspend fun getDeviceName(): String = "Pixel"
@@ -226,13 +385,27 @@ class PairingCoordinatorTest {
     private companion object {
         val PAIRING_SECRET: String = Base64Url.encode(ByteArray(32) { 9 })
 
-        fun qrPayload(windowsKeys: KeyPair) = PairingQrPayload(
+        fun coordinator(
+            windowsKeys: KeyPair,
+            connectionFactory: () -> DeviceConnection,
+        ) = DefaultPairingCoordinator(
+            identityRepository = FakeIdentityRepository(),
+            identityKeyProvider = FakeIdentityKeyProvider(ecKeyPair()),
+            trustedDeviceRepository = FakeTrustedDeviceRepository(),
+            connectionFactory = connectionFactory,
+            now = { Instant.parse("2026-07-06T12:00:00Z") },
+        )
+
+        fun qrPayload(
+            windowsKeys: KeyPair,
+            hostAddresses: List<String> = listOf("192.168.1.45"),
+        ) = PairingQrPayload(
             format = "devicesync-pairing",
             version = 1,
             sessionId = "pair-test",
             pairingSecret = PAIRING_SECRET,
             expiresAtUtc = "2026-07-06T12:02:00Z",
-            hostAddresses = listOf("192.168.1.45"),
+            hostAddresses = hostAddresses,
             port = 54321,
             windowsDeviceId = "windows-test",
             windowsDeviceName = "Windows PC",

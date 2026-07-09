@@ -15,6 +15,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.devicesync.DeviceSyncApplication
+import com.example.devicesync.core.network.NetworkLogger
 import com.example.devicesync.core.security.PairingQrParser
 import com.example.devicesync.feature.add_device.AddDeviceRoute
 import com.example.devicesync.feature.add_device.AddDeviceViewModel
@@ -79,13 +80,16 @@ fun DeviceSyncNavHost() {
             var errorText by remember { mutableStateOf<String?>(null) }
             ScanPairingQrScreen(
                 onQrScanned = { raw ->
+                    NetworkLogger.info("QR scan detected")
                     errorText = null
                     val payload = parser.parse(raw)
                         .onFailure { error ->
+                            NetworkLogger.info("QR parser rejected")
                             errorText = error.message ?: "QR-код не распознан."
                         }
                         .getOrNull()
                     if (payload != null) {
+                        NetworkLogger.info("QR parser accepted")
                         scope.launch { container.pairingCoordinator.startPairing(payload) }
                         navController.navigate(AppDestination.PairingVerification.route)
                         true
@@ -100,13 +104,7 @@ fun DeviceSyncNavHost() {
         composable(AppDestination.PairingVerification.route) {
             PairingVerificationRoute(
                 coordinator = container.pairingCoordinator,
-                connectionManager = container.connectionManager,
                 onBackClick = navController::popBackStack,
-                onConnected = { deviceId ->
-                    navController.navigate(AppDestination.DeviceDetails.createRoute(deviceId)) {
-                        popUpTo(AppDestination.Devices.route)
-                    }
-                },
             )
         }
         composable(AppDestination.Settings.route) {

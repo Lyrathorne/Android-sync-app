@@ -14,47 +14,36 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.devicesync.core.network.ConnectionManager
-import com.example.devicesync.core.network.ConnectionState
+import com.example.devicesync.BuildConfig
 import com.example.devicesync.core.security.PairingCoordinator
 import com.example.devicesync.core.security.PairingState
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
 
 @Composable
 fun PairingVerificationRoute(
     coordinator: PairingCoordinator,
-    connectionManager: ConnectionManager,
     onBackClick: () -> Unit,
-    onConnected: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by coordinator.state.collectAsStateWithLifecycle()
-    val connectionState by connectionManager.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-
-    LaunchedEffect(state) {
-        val completed = state as? PairingState.Completed ?: return@LaunchedEffect
-        runCatching {
-            connectionManager.connect(completed.hostAddresses, completed.port)
-        }
-    }
-
-    LaunchedEffect(connectionState) {
-        val connected = connectionState as? ConnectionState.Connected ?: return@LaunchedEffect
-        onConnected(connected.deviceId)
-    }
 
     PairingVerificationScreen(
         state = state,
-        connectionState = connectionState,
         onConfirmClick = { scope.launch { coordinator.confirmVerificationCode() } },
         onRejectClick = { scope.launch { coordinator.rejectVerificationCode() } },
         onBackClick = onBackClick,
@@ -65,7 +54,6 @@ fun PairingVerificationRoute(
 @Composable
 fun PairingVerificationScreen(
     state: PairingState,
-    connectionState: ConnectionState = ConnectionState.Disconnected,
     onConfirmClick: () -> Unit,
     onRejectClick: () -> Unit,
     onBackClick: () -> Unit,
@@ -97,9 +85,9 @@ fun PairingVerificationScreen(
             when (state) {
                 PairingState.Idle -> Text("Отсканируйте QR-код на компьютере.")
                 is PairingState.Connecting -> ProgressText("Подключение к ${state.windowsDeviceName}...")
-                PairingState.SendingRequest -> ProgressText("Отправка запроса привязки...")
-                PairingState.WaitingForChallenge -> ProgressText("Ожидание проверки компьютера...")
-                PairingState.VerifyingChallenge -> ProgressText("Проверка ключа...")
+                is PairingState.SendingRequest -> ProgressText("Отправка pairing.request...")
+                is PairingState.WaitingForChallenge -> ProgressText("Ожидание pairing.challenge...")
+                is PairingState.VerifyingChallenge -> ProgressText("Проверка ответа компьютера...")
                 is PairingState.WaitingForUserConfirmation -> VerificationContent(
                     state = state,
                     onConfirmClick = onConfirmClick,
@@ -107,7 +95,10 @@ fun PairingVerificationScreen(
                 )
                 PairingState.WaitingForWindowsConfirmation -> ProgressText("Ожидание подтверждения на компьютере...")
                 PairingState.SavingTrust -> ProgressText("Сохранение доверенного устройства...")
-                is PairingState.Completed -> CompletedContent(connectionState)
+                is PairingState.Completed -> Text(
+                    text = "Привязка завершена. Подключение будет выполнено отдельно.",
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 is PairingState.Failed -> Text(
                     text = state.userMessage,
                     color = MaterialTheme.colorScheme.error,
@@ -115,8 +106,88 @@ fun PairingVerificationScreen(
                 PairingState.Cancelled -> Text("Привязка отменена.")
                 PairingState.Expired -> Text("QR-код устарел. Создайте новый код на компьютере.")
             }
+
+            if (BuildConfig.DEBUG) {
+                DebugPairingInfo(state)
+            }
         }
     }
+}
+
+@Composable
+private fun DebugPairingInfo(state: PairingState) {
+    val scope = rememberCoroutineScope()
+    var probeResult by remember { mutableStateOf<String?>(null) }
+    val target = when (state) {
+        is PairingState.Connecting -> state.target
+        is PairingState.SendingRequest -> state.target
+        is PairingState.WaitingForChallenge -> state.target
+        is PairingState.VerifyingChallenge -> state.target
+        else -> "-"
+    }
+    val targets = when (state) {
+        is PairingState.Connecting -> state.targets
+        is PairingState.SendingRequest -> state.targets
+        is PairingState.WaitingForChallenge -> state.targets
+        is PairingState.VerifyingChallenge -> state.targets
+        else -> emptyList()
+    }
+    val tcp = when (state) {
+        is PairingState.Connecting -> "connecting"
+        is PairingState.SendingRequest,
+        is PairingState.WaitingForChallenge,
+        is PairingState.VerifyingChallenge,
+        is PairingState.WaitingForUserConfirmation -> "connected"
+        else -> "-"
+    }
+    val sent = when (state) {
+        is PairingState.WaitingForChallenge,
+        is PairingState.VerifyingChallenge,
+        is PairingState.WaitingForUserConfirmation -> "pairing.request"
+        else -> "none"
+    }
+    val received = when (state) {
+        is PairingState.VerifyingChallenge,
+        is PairingState.WaitingForUserConfirmation -> "pairing.challenge"
+        else -> "none"
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("State: ${state::class.simpleName}")
+        Text("Target addresses:")
+        targets.forEach { Text("- $it") }
+        Text("Target: $target")
+        Text("TCP: $tcp")
+        Text("Sent: $sent")
+        Text("Received: $received")
+        Text("Elapsed: see logcat timestamps")
+        if (target != "-") {
+            Button(
+                onClick = {
+                    scope.launch {
+                        probeResult = probeTcp(target)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Проверить TCP")
+            }
+        }
+        probeResult?.let { Text(it) }
+    }
+}
+
+private suspend fun probeTcp(target: String): String = withContext(Dispatchers.IO) {
+    val host = target.substringBeforeLast(':')
+    val port = target.substringAfterLast(':').toIntOrNull()
+        ?: return@withContext "TCP недоступен: invalid port"
+    runCatching {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(host, port), 5_000)
+        }
+    }.fold(
+        onSuccess = { "TCP доступен" },
+        onFailure = { error -> "TCP недоступен: ${error::class.simpleName}" },
+    )
 }
 
 @Composable
@@ -127,29 +198,6 @@ private fun ProgressText(text: String) {
     ) {
         CircularProgressIndicator()
         Text(text)
-    }
-}
-
-@Composable
-private fun CompletedContent(connectionState: ConnectionState) {
-    when (connectionState) {
-        is ConnectionState.Connecting,
-        is ConnectionState.Handshaking,
-        is ConnectionState.AuthenticatingWindows,
-        is ConnectionState.ProvingAndroidIdentity -> ProgressText("Подключение к компьютеру...")
-        is ConnectionState.Connected -> Text(
-            text = "Connected",
-            color = MaterialTheme.colorScheme.primary,
-        )
-        is ConnectionState.Failed -> Text(
-            text = connectionState.message,
-            color = MaterialTheme.colorScheme.error,
-        )
-        ConnectionState.PairingRequired -> Text(
-            text = "Компьютер ещё не привязан. Отсканируйте QR-код.",
-            color = MaterialTheme.colorScheme.error,
-        )
-        else -> ProgressText("Подключение к компьютеру...")
     }
 }
 

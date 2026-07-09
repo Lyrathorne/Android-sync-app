@@ -17,6 +17,13 @@ class PairingQrParserTest {
     }
 
     @Test
+    fun parse_validCompactQr() {
+        val result = parser.parse(validCompactQr())
+
+        assertTrue(result.isSuccess)
+    }
+
+    @Test
     fun parse_rejectsWrongFormat() {
         assertTrue(parser.parse(validQr(format = "other")).isFailure)
     }
@@ -64,6 +71,26 @@ class PairingQrParserTest {
               "windowsIdentityFingerprint":"$fingerprint",
               "protocolMin":$protocolMin,
               "protocolMax":$protocolMax
+            }
+        """.trimIndent()
+    }
+
+    private fun validCompactQr(): String {
+        return """
+            {
+              "f":"devicesync-pairing",
+              "v":1,
+              "sid":"pair-test",
+              "sec":"${Base64Url.encode(ByteArray(32) { it.toByte() })}",
+              "exp":"2026-07-06T12:02:00Z",
+              "h":["192.168.1.25"],
+              "p":54321,
+              "did":"windows-test",
+              "dn":"Gleb-PC",
+              "pk":"${Base64Url.encode(publicKey)}",
+              "fp":"$fingerprint",
+              "pmin":1,
+              "pmax":1
             }
         """.trimIndent()
     }

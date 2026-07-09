@@ -28,6 +28,9 @@ sealed class ConnectionException(
     class ConnectionRefused(cause: Throwable? = null) :
         ConnectionException("Соединение отклонено", cause)
 
+    class NoRouteToHost(cause: Throwable? = null) :
+        ConnectionException("NO_ROUTE_TO_HOST", cause)
+
     class ConnectionClosed(cause: Throwable? = null) :
         ConnectionException("Компьютер закрыл соединение", cause)
 

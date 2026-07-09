@@ -3,6 +3,10 @@ package com.example.devicesync.core.security
 import com.example.devicesync.core.discovery.DEVICESYNC_PROTOCOL_VERSION
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import java.time.Instant
 
 @Serializable
@@ -31,7 +35,7 @@ class PairingQrParser(
     fun parse(raw: String): Result<PairingQrPayload> {
         return runCatching {
             require(raw.toByteArray().size <= maxPayloadSize) { "QR payload is too large." }
-            val payload = json.decodeFromString<PairingQrPayload>(raw)
+            val payload = decodePayload(raw)
             require(payload.format == "devicesync-pairing") { "QR belongs to another application." }
             require(payload.version == 1) { "Unsupported QR version." }
             require(payload.sessionId.isNotBlank()) { "Pairing session is missing." }
@@ -50,5 +54,28 @@ class PairingQrParser(
             require(Instant.parse(payload.expiresAtUtc).isAfter(now())) { "QR code has expired." }
             payload
         }
+    }
+
+    private fun decodePayload(raw: String): PairingQrPayload {
+        val root = json.parseToJsonElement(raw).jsonObject
+        if (!root.containsKey("sid")) {
+            return json.decodeFromString<PairingQrPayload>(raw)
+        }
+
+        return PairingQrPayload(
+            format = root.getValue("f").jsonPrimitive.content,
+            version = root.getValue("v").jsonPrimitive.int,
+            sessionId = root.getValue("sid").jsonPrimitive.content,
+            pairingSecret = root.getValue("sec").jsonPrimitive.content,
+            expiresAtUtc = root.getValue("exp").jsonPrimitive.content,
+            hostAddresses = root.getValue("h").jsonArray.map { it.jsonPrimitive.content },
+            port = root.getValue("p").jsonPrimitive.int,
+            windowsDeviceId = root.getValue("did").jsonPrimitive.content,
+            windowsDeviceName = root.getValue("dn").jsonPrimitive.content,
+            windowsIdentityPublicKey = root.getValue("pk").jsonPrimitive.content,
+            windowsIdentityFingerprint = root.getValue("fp").jsonPrimitive.content,
+            protocolMin = root.getValue("pmin").jsonPrimitive.int,
+            protocolMax = root.getValue("pmax").jsonPrimitive.int,
+        )
     }
 }

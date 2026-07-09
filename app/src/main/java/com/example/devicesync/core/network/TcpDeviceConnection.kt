@@ -30,7 +30,7 @@ class TcpDeviceConnection(
     override suspend fun connect(host: String, port: Int) = withContext(Dispatchers.IO) {
         disconnect()
         try {
-            NetworkLogger.info("Connecting to $host:$port")
+            NetworkLogger.info("TCP_ATTEMPT_STARTED $host:$port")
             val newSocket = Socket()
             newSocket.connect(InetSocketAddress(host, port), connectTimeoutMs)
             newSocket.soTimeout = readTimeoutMs
@@ -38,15 +38,33 @@ class TcpDeviceConnection(
             socket = newSocket
             reader = ProtocolFrameReader(newSocket.getInputStream())
             writer = ProtocolFrameWriter(newSocket.getOutputStream())
-            NetworkLogger.info("TCP connection established")
+            NetworkLogger.info("TCP_CONNECTED")
         } catch (error: CancellationException) {
             disconnect()
             throw error
         } catch (error: SocketTimeoutException) {
             disconnect()
+            NetworkLogger.info("TCP_CONNECT_TIMEOUT $host:$port")
             throw ConnectionException.TcpConnectTimeout(host, port, error)
+        } catch (error: ConnectException) {
+            disconnect()
+            NetworkLogger.info("TCP_CONNECT_REFUSED $host:$port")
+            throw ConnectionException.ConnectionRefused(error)
+        } catch (error: NoRouteToHostException) {
+            disconnect()
+            NetworkLogger.info("TCP_CONNECT_FAILED $host:$port NO_ROUTE_TO_HOST")
+            throw ConnectionException.NoRouteToHost(error)
+        } catch (error: UnknownHostException) {
+            disconnect()
+            NetworkLogger.info("TCP_CONNECT_FAILED $host:$port INVALID_ADDRESS")
+            throw ConnectionException.InvalidAddress(error)
+        } catch (error: IllegalArgumentException) {
+            disconnect()
+            NetworkLogger.info("TCP_CONNECT_FAILED $host:$port INVALID_ADDRESS")
+            throw ConnectionException.InvalidAddress(error)
         } catch (error: Throwable) {
             disconnect()
+            NetworkLogger.info("TCP_CONNECT_FAILED $host:$port")
             throw error.toConnectionException()
         }
     }
@@ -56,7 +74,12 @@ class TcpDeviceConnection(
         NetworkLogger.info("TCP read timeout disabled after handshake")
     }
 
+    override suspend fun setReadTimeout(timeoutMs: Int) = withContext(Dispatchers.IO) {
+        socket?.soTimeout = timeoutMs
+    }
+
     override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage = withContext(Dispatchers.IO) {
+        socket?.soTimeout = timeoutMs.toInt()
         withTimeout(timeoutMs) {
             receive()
         }
@@ -108,8 +131,8 @@ fun Throwable.toConnectionException(): ConnectionException {
         is TimeoutCancellationException -> ConnectionException.Timeout(this)
         is SocketTimeoutException -> ConnectionException.Timeout(this)
         is ConnectException -> ConnectionException.ConnectionRefused(this)
+        is NoRouteToHostException -> ConnectionException.NoRouteToHost(this)
         is UnknownHostException,
-        is NoRouteToHostException,
         is IllegalArgumentException -> ConnectionException.InvalidAddress(this)
         is IOException -> ConnectionException.ConnectionClosed(this)
         else -> ConnectionException.Unknown(this)

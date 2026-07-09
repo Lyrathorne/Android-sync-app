@@ -1,10 +1,11 @@
 package com.example.devicesync.core.security
 
 import com.example.devicesync.BuildConfig
-import com.example.devicesync.core.discovery.DiscoveryAddressSelector
 import com.example.devicesync.core.discovery.DEVICESYNC_PROTOCOL_VERSION
+import com.example.devicesync.core.discovery.DiscoveryAddressSelector
 import com.example.devicesync.core.network.ConnectionException
 import com.example.devicesync.core.network.DeviceConnection
+import com.example.devicesync.core.network.NetworkLogger
 import com.example.devicesync.core.network.TcpDeviceConnection
 import com.example.devicesync.core.protocol.PairingAcceptedPayload
 import com.example.devicesync.core.protocol.PairingChallengePayload
@@ -22,17 +23,17 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.time.Instant
 import java.util.UUID
 
 sealed interface PairingState {
     data object Idle : PairingState
-    data class Connecting(val windowsDeviceName: String) : PairingState
-    data object SendingRequest : PairingState
-    data object WaitingForChallenge : PairingState
-    data object VerifyingChallenge : PairingState
+    data class Connecting(val windowsDeviceName: String, val target: String, val targets: List<String>) : PairingState
+    data class SendingRequest(val target: String, val targets: List<String>) : PairingState
+    data class WaitingForChallenge(val target: String, val targets: List<String>) : PairingState
+    data class VerifyingChallenge(val target: String, val targets: List<String>) : PairingState
     data class WaitingForUserConfirmation(
         val windowsDeviceId: String,
         val windowsDeviceName: String,
@@ -77,18 +78,25 @@ class DefaultPairingCoordinator(
 
     override suspend fun startPairing(payload: PairingQrPayload) {
         terminateActive()
+        NetworkLogger.info("QR_PARSED")
         if (!Instant.parse(payload.expiresAtUtc).isAfter(now())) {
             _state.value = PairingState.Expired
+            NetworkLogger.info("PAIRING_FAILED code=PAIRING_SESSION_EXPIRED")
             return
         }
 
         val hosts = addressSelector.orderedUsableAddresses(payload.hostAddresses)
+        val targets = hosts.map { "$it:${payload.port}" }
+        if (targets.isNotEmpty()) {
+            NetworkLogger.info("PAIRING_TARGETS ${targets.joinToString()}")
+        }
         if (hosts.isEmpty()) {
-            _state.value = PairingState.Failed("QR-код не содержит адрес компьютера.", "QR_NO_HOST")
+            failWithoutActive("QR-код не содержит доступный адрес компьютера.", "PAIRING_PROTOCOL_ERROR")
             return
         }
 
-        val connection = connectPairingSocket(payload, hosts) ?: return
+        val connection = connectPairingSocket(payload, hosts, targets) ?: return
+        val target = active?.target ?: "${hosts.first()}:${payload.port}"
         try {
             val androidDeviceId = identityRepository.getOrCreateDeviceId()
             val androidDeviceName = identityRepository.getDeviceName()
@@ -102,41 +110,67 @@ class DefaultPairingCoordinator(
                 androidNonce = requestDraft.androidNonce,
             )
 
-            _state.value = PairingState.SendingRequest
-            connection.send(
-                ProtocolMessage(
-                    protocolVersion = DEVICESYNC_PROTOCOL_VERSION,
-                    messageId = UUID.randomUUID().toString(),
-                    type = ProtocolMessageType.PAIRING_REQUEST.value,
-                    senderDeviceId = androidDeviceId,
-                    recipientDeviceId = payload.windowsDeviceId,
-                    timestampUtc = now().toString(),
-                    payload = ProtocolSerializer.payloadToJson(
-                        PairingRequestPayload(
-                            sessionId = payload.sessionId,
-                            androidDeviceId = androidDeviceId,
-                            androidDeviceName = androidDeviceName,
-                            androidAppVersion = BuildConfig.VERSION_NAME,
-                            androidIdentityPublicKey = Base64Url.encode(androidPublicKey),
-                            androidIdentityFingerprint = requestDraft.androidFingerprint,
-                            androidNonce = requestDraft.androidNonce,
-                            proof = requestDraft.proof,
-                        )
-                    ),
-                )
+            _state.value = PairingState.SendingRequest(target, targets)
+            val requestMessage = ProtocolMessage(
+                protocolVersion = DEVICESYNC_PROTOCOL_VERSION,
+                messageId = UUID.randomUUID().toString(),
+                type = ProtocolMessageType.PAIRING_REQUEST.value,
+                senderDeviceId = androidDeviceId,
+                recipientDeviceId = payload.windowsDeviceId,
+                timestampUtc = now().toString(),
+                payload = ProtocolSerializer.payloadToJson(
+                    PairingRequestPayload(
+                        sessionId = payload.sessionId,
+                        androidDeviceId = androidDeviceId,
+                        androidDeviceName = androidDeviceName,
+                        androidAppVersion = BuildConfig.VERSION_NAME,
+                        androidIdentityPublicKey = Base64Url.encode(androidPublicKey),
+                        androidIdentityFingerprint = requestDraft.androidFingerprint,
+                        androidNonce = requestDraft.androidNonce,
+                        proof = requestDraft.proof,
+                    )
+                ),
             )
+            check(requestMessage.type == ProtocolMessageType.PAIRING_REQUEST.value) {
+                "Pairing connection first outgoing type must be pairing.request"
+            }
+            NetworkLogger.info("PAIRING_REQUEST_BUILT")
+            withTimeout(PAIRING_REQUEST_SEND_TIMEOUT_MS) {
+                connection.send(requestMessage)
+            }
+            NetworkLogger.info("PAIRING_REQUEST_SENT")
 
-            _state.value = PairingState.WaitingForChallenge
+            _state.value = PairingState.WaitingForChallenge(target, targets)
+            NetworkLogger.info("WAITING_FOR_CHALLENGE")
             val challengeMessage = receivePairingHandshake(connection)
-            if (challengeMessage.type != ProtocolMessageType.PAIRING_CHALLENGE.value) {
-                failAndClose("Компьютер отклонил привязку.", "PAIRING_ORDER")
-                return
+            NetworkLogger.info("PAIRING_MESSAGE_RECEIVED ${challengeMessage.type}")
+            when (challengeMessage.type) {
+                ProtocolMessageType.PAIRING_CHALLENGE.value -> Unit
+                ProtocolMessageType.PAIRING_REJECTED.value -> {
+                    failAndClose("Компьютер отклонил привязку.", "PAIRING_PROTOCOL_ERROR")
+                    return
+                }
+                ProtocolMessageType.PAIRING_CANCEL.value -> {
+                    failAndClose("Привязка отменена на компьютере.", "PAIRING_PROTOCOL_ERROR")
+                    return
+                }
+                else -> {
+                    failAndClose("Компьютер прислал неожиданный ответ: ${challengeMessage.type}.", "PAIRING_PROTOCOL_ERROR")
+                    return
+                }
             }
 
-            _state.value = PairingState.VerifyingChallenge
+            _state.value = PairingState.VerifyingChallenge(target, targets)
             val challenge = ProtocolSerializer.decodePayload<PairingChallengePayload>(challengeMessage.payload)
+            NetworkLogger.info(
+                if (challenge.sessionId == payload.sessionId) {
+                    "Pairing session ID match"
+                } else {
+                    "Pairing session ID mismatch"
+                }
+            )
             if (!verifyChallenge(payload, requestDraft, challenge)) {
-                failAndClose("Проверка безопасности привязки не прошла.", "CHALLENGE_INVALID")
+                failAndClose("Проверка безопасности привязки не прошла.", "PAIRING_PROTOCOL_ERROR")
                 return
             }
 
@@ -158,18 +192,23 @@ class DefaultPairingCoordinator(
                 expiresAtUtc = Instant.parse(payload.expiresAtUtc),
             )
         } catch (error: Throwable) {
-            failAndClose(error.message ?: "Не удалось выполнить привязку.", "PAIRING_FAILED")
+            val code = error.toPairingFailureCode()
+            failAndClose(error.message ?: "Не удалось выполнить привязку.", code)
         }
     }
 
-    private suspend fun connectPairingSocket(payload: PairingQrPayload, hosts: List<String>): DeviceConnection? {
+    private suspend fun connectPairingSocket(payload: PairingQrPayload, hosts: List<String>, targets: List<String>): DeviceConnection? {
         var lastError: Throwable? = null
         for (host in hosts) {
             val connection = connectionFactory()
-            active = ActivePairing(payload = payload, connection = connection)
+            val target = "$host:${payload.port}"
+            active = ActivePairing(payload = payload, connection = connection, target = target)
             try {
-                _state.value = PairingState.Connecting(payload.windowsDeviceName)
+                _state.value = PairingState.Connecting(payload.windowsDeviceName, target, targets)
+                NetworkLogger.info("PAIRING_CONNECT_STARTED $target")
                 connection.connect(host, payload.port)
+                connection.setReadTimeout(PAIRING_CHALLENGE_TIMEOUT_MS.toInt())
+                NetworkLogger.info("PAIRING_TCP_CONNECTED")
                 return connection
             } catch (error: Throwable) {
                 lastError = error
@@ -178,9 +217,10 @@ class DefaultPairingCoordinator(
             }
         }
 
-        _state.value = PairingState.Failed(
-            lastError?.message ?: "РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ РїСЂРёРІСЏР·РєСѓ.",
-            "PAIRING_FAILED",
+        val lastTarget = "${hosts.last()}:${payload.port}"
+        failWithoutActive(
+            lastError?.message ?: "Не удалось подключиться к компьютеру.\n\nАдрес: $lastTarget\nПроверьте Windows Firewall и подключение к одной сети.",
+            lastError.toTcpConnectFailureCode(),
         )
         return null
     }
@@ -193,7 +233,7 @@ class DefaultPairingCoordinator(
         val windowsNonce = pairing.windowsNonce ?: return
         val verificationCode = pairing.verificationCode ?: return
         if (!Instant.parse(pairing.payload.expiresAtUtc).isAfter(now())) {
-            failAndClose("QR-код устарел. Создайте новый код на компьютере.", "PAIRING_EXPIRED")
+            failAndClose("QR-код устарел. Создайте новый код на компьютере.", "PAIRING_SESSION_EXPIRED")
             return
         }
 
@@ -228,12 +268,12 @@ class DefaultPairingCoordinator(
         )
         val acceptedMessage = receivePairingHandshake(pairing.connection)
         if (acceptedMessage.type != ProtocolMessageType.PAIRING_ACCEPTED.value) {
-            failAndClose("Компьютер не завершил привязку.", "ACCEPTED_EXPECTED")
+            failAndClose("Компьютер не завершил привязку.", "PAIRING_PROTOCOL_ERROR")
             return
         }
         val accepted = ProtocolSerializer.decodePayload<PairingAcceptedPayload>(acceptedMessage.payload)
         if (!verifyAccepted(pairing, accepted)) {
-            failAndClose("Подпись компьютера не прошла проверку.", "ACCEPTED_INVALID")
+            failAndClose("Подпись компьютера не прошла проверку.", "PAIRING_PROTOCOL_ERROR")
             return
         }
 
@@ -360,16 +400,23 @@ class DefaultPairingCoordinator(
 
     private suspend fun failAndClose(message: String, technicalCode: String) {
         terminateActive()
+        failWithoutActive(message, technicalCode)
+    }
+
+    private fun failWithoutActive(message: String, technicalCode: String) {
+        NetworkLogger.info("PAIRING_FAILED code=$technicalCode")
         _state.value = PairingState.Failed(message, technicalCode)
     }
 
     private suspend fun receivePairingHandshake(connection: DeviceConnection): ProtocolMessage {
         return try {
-            connection.receiveHandshake(PAIRING_TIMEOUT_MS)
+            connection.receiveHandshake(PAIRING_CHALLENGE_TIMEOUT_MS)
         } catch (error: TimeoutCancellationException) {
-            throw ConnectionException.PairingTimeout(error)
+            throw PairingFlowException("Превышено время ожидания ответа компьютера.", "PAIRING_CHALLENGE_TIMEOUT", error)
         } catch (error: ConnectionException.Timeout) {
-            throw ConnectionException.PairingTimeout(error)
+            throw PairingFlowException("Превышено время ожидания ответа компьютера.", "PAIRING_CHALLENGE_TIMEOUT", error)
+        } catch (error: ConnectionException.ConnectionClosed) {
+            throw PairingFlowException("Компьютер закрыл соединение до ответа.", "PAIRING_CONNECTION_CLOSED", error)
         }
     }
 
@@ -384,9 +431,32 @@ class DefaultPairingCoordinator(
         scope.launch { trustedDeviceRepository.observeTrustedDevices().collect {} }
     }
 
+    private fun Throwable.toPairingFailureCode(): String {
+        return when (this) {
+            is PairingFlowException -> code
+            is TimeoutCancellationException -> "PAIRING_REQUEST_SEND_TIMEOUT"
+            is ConnectionException.TcpConnectTimeout -> "TCP_CONNECT_TIMEOUT"
+            is ConnectionException.ConnectionRefused -> "TCP_CONNECTION_REFUSED"
+            is ConnectionException.NoRouteToHost -> "NO_ROUTE_TO_HOST"
+            is ConnectionException.ConnectionClosed -> "PAIRING_CONNECTION_CLOSED"
+            is ConnectionException.Timeout -> "PAIRING_CHALLENGE_TIMEOUT"
+            else -> "PAIRING_PROTOCOL_ERROR"
+        }
+    }
+
+    private fun Throwable?.toTcpConnectFailureCode(): String {
+        return when (this) {
+            is ConnectionException.TcpConnectTimeout -> "TCP_CONNECT_TIMEOUT"
+            is ConnectionException.ConnectionRefused -> "TCP_CONNECTION_REFUSED"
+            is ConnectionException.NoRouteToHost -> "NO_ROUTE_TO_HOST"
+            else -> "TCP_CONNECT_FAILED"
+        }
+    }
+
     private data class ActivePairing(
         val payload: PairingQrPayload,
         val connection: DeviceConnection,
+        val target: String,
         val androidDeviceId: String? = null,
         val androidDeviceName: String? = null,
         val androidPublicKey: String? = null,
@@ -397,6 +467,13 @@ class DefaultPairingCoordinator(
     )
 
     private companion object {
-        const val PAIRING_TIMEOUT_MS = 8_000L
+        const val PAIRING_REQUEST_SEND_TIMEOUT_MS = 5_000L
+        const val PAIRING_CHALLENGE_TIMEOUT_MS = 10_000L
     }
 }
+
+private class PairingFlowException(
+    message: String,
+    val code: String,
+    cause: Throwable? = null,
+) : Exception(message, cause)
