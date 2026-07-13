@@ -16,6 +16,7 @@ import com.example.devicesync.core.protocol.ProtocolMessage
 import com.example.devicesync.core.protocol.ProtocolMessageType
 import com.example.devicesync.core.protocol.ProtocolSerializer
 import com.example.devicesync.core.settings.DeviceIdentityRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -237,6 +238,31 @@ class DefaultPairingCoordinator(
             return
         }
 
+        try {
+            completePairingConfirmation(
+                pairing = pairing,
+                androidDeviceId = androidDeviceId,
+                androidNonce = androidNonce,
+                androidFingerprint = androidFingerprint,
+                windowsNonce = windowsNonce,
+                verificationCode = verificationCode,
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            val code = error.toPairingFailureCode()
+            failAndClose(error.message ?: "Не удалось завершить привязку.", code)
+        }
+    }
+
+    private suspend fun completePairingConfirmation(
+        pairing: ActivePairing,
+        androidDeviceId: String,
+        androidNonce: String,
+        androidFingerprint: String,
+        windowsNonce: String,
+        verificationCode: String,
+    ) {
         val transcript = TranscriptBuilder.pairingConfirmation(
             sessionId = pairing.payload.sessionId,
             windowsDeviceId = pairing.payload.windowsDeviceId,
@@ -266,7 +292,11 @@ class DefaultPairingCoordinator(
                 ),
             )
         )
-        val acceptedMessage = receivePairingHandshake(pairing.connection)
+        val acceptedMessage = receivePairingHandshake(
+            pairing.connection,
+            PAIRING_ACCEPTED_TIMEOUT_MS,
+            "PAIRING_ACCEPTED_TIMEOUT",
+        )
         if (acceptedMessage.type != ProtocolMessageType.PAIRING_ACCEPTED.value) {
             failAndClose("Компьютер не завершил привязку.", "PAIRING_PROTOCOL_ERROR")
             return
@@ -408,13 +438,17 @@ class DefaultPairingCoordinator(
         _state.value = PairingState.Failed(message, technicalCode)
     }
 
-    private suspend fun receivePairingHandshake(connection: DeviceConnection): ProtocolMessage {
+    private suspend fun receivePairingHandshake(
+        connection: DeviceConnection,
+        timeoutMs: Long = PAIRING_CHALLENGE_TIMEOUT_MS,
+        timeoutCode: String = "PAIRING_CHALLENGE_TIMEOUT",
+    ): ProtocolMessage {
         return try {
-            connection.receiveHandshake(PAIRING_CHALLENGE_TIMEOUT_MS)
+            connection.receiveHandshake(timeoutMs)
         } catch (error: TimeoutCancellationException) {
-            throw PairingFlowException("Превышено время ожидания ответа компьютера.", "PAIRING_CHALLENGE_TIMEOUT", error)
+            throw PairingFlowException("Превышено время ожидания ответа компьютера.", timeoutCode, error)
         } catch (error: ConnectionException.Timeout) {
-            throw PairingFlowException("Превышено время ожидания ответа компьютера.", "PAIRING_CHALLENGE_TIMEOUT", error)
+            throw PairingFlowException("Превышено время ожидания ответа компьютера.", timeoutCode, error)
         } catch (error: ConnectionException.ConnectionClosed) {
             throw PairingFlowException("Компьютер закрыл соединение до ответа.", "PAIRING_CONNECTION_CLOSED", error)
         }
@@ -469,6 +503,7 @@ class DefaultPairingCoordinator(
     private companion object {
         const val PAIRING_REQUEST_SEND_TIMEOUT_MS = 5_000L
         const val PAIRING_CHALLENGE_TIMEOUT_MS = 10_000L
+        const val PAIRING_ACCEPTED_TIMEOUT_MS = 60_000L
     }
 }
 

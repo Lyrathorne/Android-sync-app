@@ -45,6 +45,7 @@ class PairingCoordinatorTest {
         coordinator.confirmVerificationCode()
 
         assertEquals(ProtocolMessageType.PAIRING_REQUEST.value, connection.sent.first().type)
+        assertEquals(listOf(10_000L, 60_000L), connection.receivedTimeouts)
         assertNotNull(trusted.saved)
         assertEquals("windows-test", trusted.saved?.deviceId)
         assertTrue(connection.sent.any { it.type == ProtocolMessageType.PAIRING_COMPLETE_ACK.value })
@@ -86,6 +87,20 @@ class PairingCoordinatorTest {
         val state = coordinator.state.value as PairingState.Failed
         assertEquals("PAIRING_CHALLENGE_TIMEOUT", state.technicalCode)
         assertEquals(ProtocolMessageType.PAIRING_REQUEST.value, connection.sent.first().type)
+    }
+
+    @Test
+    fun acceptedTimeoutMovesToFailed() = runTest {
+        val windowsKeys = ecKeyPair()
+        val connection = ConfirmationFailingConnection(windowsKeys)
+        val coordinator = coordinator(windowsKeys, connectionFactory = { connection })
+
+        coordinator.startPairing(qrPayload(windowsKeys))
+        coordinator.confirmVerificationCode()
+
+        val state = coordinator.state.value as PairingState.Failed
+        assertEquals("PAIRING_ACCEPTED_TIMEOUT", state.technicalCode)
+        assertEquals(listOf(10_000L, 60_000L), connection.receivedTimeouts)
     }
 
     @Test
@@ -176,6 +191,7 @@ class PairingCoordinatorTest {
         private val corruptAcceptedSignature: Boolean = false,
     ) : DeviceConnection {
         val sent = mutableListOf<ProtocolMessage>()
+        val receivedTimeouts = mutableListOf<Long>()
         var connectAttempted = false
         private val windowsNonce = Base64Url.encode(ByteArray(32) { 7 })
 
@@ -192,6 +208,7 @@ class PairingCoordinatorTest {
         }
 
         override open suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage {
+            receivedTimeouts += timeoutMs
             val last = sent.last()
             return when (last.type) {
                 ProtocolMessageType.PAIRING_REQUEST.value -> challenge(last)
@@ -282,6 +299,18 @@ class PairingCoordinatorTest {
                     )
                 ),
             )
+        }
+    }
+
+    private class ConfirmationFailingConnection(
+        windowsKeys: KeyPair,
+    ) : ScriptedPairingConnection(windowsKeys) {
+        override suspend fun receiveHandshake(timeoutMs: Long): ProtocolMessage {
+            if (sent.lastOrNull()?.type == ProtocolMessageType.PAIRING_CONFIRM.value) {
+                receivedTimeouts += timeoutMs
+                throw ConnectionException.Timeout()
+            }
+            return super.receiveHandshake(timeoutMs)
         }
     }
 
