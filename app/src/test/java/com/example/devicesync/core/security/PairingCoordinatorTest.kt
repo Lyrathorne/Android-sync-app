@@ -440,6 +440,7 @@ class PairingCoordinatorTest {
             windowsDeviceName = "Windows PC",
             windowsIdentityPublicKey = Base64Url.encode(windowsKeys.public.encoded),
             windowsIdentityFingerprint = SecurityEncoding.fingerprint(windowsKeys.public.encoded),
+            tlsServerSpkiFingerprint = SecurityEncoding.fingerprint(windowsKeys.public.encoded),
             protocolMin = 1,
             protocolMax = 1,
         )

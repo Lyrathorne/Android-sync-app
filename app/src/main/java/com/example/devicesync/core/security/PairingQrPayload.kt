@@ -22,6 +22,7 @@ data class PairingQrPayload(
     val windowsDeviceName: String,
     val windowsIdentityPublicKey: String,
     val windowsIdentityFingerprint: String,
+    val tlsServerSpkiFingerprint: String,
     val protocolMin: Int,
     val protocolMax: Int,
 )
@@ -47,6 +48,9 @@ class PairingQrParser(
             val publicKey = Base64Url.decode(payload.windowsIdentityPublicKey)
             require(SecurityEncoding.fingerprint(publicKey) == payload.windowsIdentityFingerprint) {
                 "Windows key fingerprint does not match."
+            }
+            require(Base64Url.decode(payload.tlsServerSpkiFingerprint).size == 32) {
+                "TLS server fingerprint is invalid."
             }
             require(DEVICESYNC_PROTOCOL_VERSION in payload.protocolMin..payload.protocolMax) {
                 "DeviceSync protocol versions are incompatible."
@@ -74,6 +78,7 @@ class PairingQrParser(
             windowsDeviceName = root.getValue("dn").jsonPrimitive.content,
             windowsIdentityPublicKey = root.getValue("pk").jsonPrimitive.content,
             windowsIdentityFingerprint = root.getValue("fp").jsonPrimitive.content,
+            tlsServerSpkiFingerprint = root.getValue("tlsfp").jsonPrimitive.content,
             protocolMin = root.getValue("pmin").jsonPrimitive.int,
             protocolMax = root.getValue("pmax").jsonPrimitive.int,
         )

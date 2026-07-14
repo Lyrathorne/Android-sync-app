@@ -207,6 +207,7 @@ class DefaultPairingCoordinator(
             try {
                 _state.value = PairingState.Connecting(payload.windowsDeviceName, target, targets)
                 NetworkLogger.info("PAIRING_CONNECT_STARTED $target")
+                connection.setTlsServerSpkiFingerprint(payload.tlsServerSpkiFingerprint)
                 connection.connect(host, payload.port)
                 connection.setReadTimeout(PAIRING_CHALLENGE_TIMEOUT_MS.toInt())
                 NetworkLogger.info("PAIRING_TCP_CONNECTED")
@@ -314,7 +315,7 @@ class DefaultPairingCoordinator(
                 deviceName = pairing.payload.windowsDeviceName,
                 identityPublicKey = pairing.payload.windowsIdentityPublicKey,
                 identityFingerprint = pairing.payload.windowsIdentityFingerprint,
-                futureTlsCertificateFingerprint = null,
+                futureTlsCertificateFingerprint = pairing.payload.tlsServerSpkiFingerprint,
                 pairedAt = Instant.parse(accepted.pairedAtUtc),
                 lastVerifiedAt = null,
                 revokedAt = null,

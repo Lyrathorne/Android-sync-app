@@ -38,6 +38,7 @@ import com.example.devicesync.ui.theme.DeviceSyncTheme
 fun DevicesRoute(
     onAddDeviceClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onSharingClick: () -> Unit,
     onDeviceClick: (String) -> Unit,
     viewModel: DevicesViewModel = viewModel(),
 ) {
@@ -47,6 +48,7 @@ fun DevicesRoute(
         uiState = uiState.value,
         onAddDeviceClick = onAddDeviceClick,
         onSettingsClick = onSettingsClick,
+        onSharingClick = onSharingClick,
         onDeviceClick = onDeviceClick,
         onRetryClick = viewModel::retryLoading,
     )
@@ -58,6 +60,7 @@ fun DevicesScreen(
     uiState: DevicesUiState,
     onAddDeviceClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onSharingClick: () -> Unit,
     onDeviceClick: (String) -> Unit,
     onRetryClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -79,6 +82,7 @@ fun DevicesScreen(
                 TextButton(onClick = onSettingsClick) {
                     Text(stringResource(R.string.settings))
                 }
+                TextButton(onClick = onSharingClick) { Text("Share") }
             }
         },
     ) { padding ->
@@ -264,6 +268,7 @@ private fun DevicesScreenPreview() {
             uiState = DevicesUiState(devices = SampleDevices.devices),
             onAddDeviceClick = {},
             onSettingsClick = {},
+            onSharingClick = {},
             onDeviceClick = {},
             onRetryClick = {},
         )
@@ -278,6 +283,7 @@ private fun EmptyDevicesScreenPreview() {
             uiState = DevicesUiState(),
             onAddDeviceClick = {},
             onSettingsClick = {},
+            onSharingClick = {},
             onDeviceClick = {},
             onRetryClick = {},
         )

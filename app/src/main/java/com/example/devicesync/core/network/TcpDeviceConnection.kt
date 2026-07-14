@@ -17,6 +17,15 @@ import java.net.NoRouteToHostException
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.security.SecureRandom
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509TrustManager
+import com.example.devicesync.core.security.Base64Url
+import com.example.devicesync.core.security.SecurityEncoding
 
 class TcpDeviceConnection(
     private val connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
@@ -26,19 +35,38 @@ class TcpDeviceConnection(
     private var socket: Socket? = null
     private var reader: ProtocolFrameReader? = null
     private var writer: ProtocolFrameWriter? = null
+    @Volatile
+    private var expectedTlsServerSpkiFingerprint: String? = null
+
+    override fun setTlsServerSpkiFingerprint(fingerprint: String) {
+        require(Base64Url.decode(fingerprint).size == 32) { "TLS server fingerprint is invalid." }
+        expectedTlsServerSpkiFingerprint = fingerprint
+    }
 
     override suspend fun connect(host: String, port: Int) = withContext(Dispatchers.IO) {
         disconnect()
         try {
             NetworkLogger.info("TCP_ATTEMPT_STARTED $host:$port")
-            val newSocket = Socket()
-            newSocket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+            val expectedFingerprint = expectedTlsServerSpkiFingerprint
+                ?: throw ConnectionException.InvalidMessage("PAIRING_REQUIRED_TLS_PIN")
+            val tcpSocket = Socket()
+            tcpSocket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+            tcpSocket.soTimeout = readTimeoutMs
+            val trustManager = PinnedSpkiTrustManager(expectedFingerprint)
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf(trustManager), SecureRandom())
+            val newSocket = sslContext.socketFactory
+                .createSocket(tcpSocket, host, port, true) as SSLSocket
+            newSocket.enabledProtocols = newSocket.supportedProtocols
+                .filter { it == "TLSv1.2" || it == "TLSv1.3" }
+                .toTypedArray()
+            newSocket.startHandshake()
             newSocket.soTimeout = readTimeoutMs
 
             socket = newSocket
             reader = ProtocolFrameReader(newSocket.getInputStream())
             writer = ProtocolFrameWriter(newSocket.getOutputStream())
-            NetworkLogger.info("TCP_CONNECTED")
+            NetworkLogger.info("TLS_CONNECTED ${newSocket.session.protocol}")
         } catch (error: CancellationException) {
             disconnect()
             throw error
@@ -46,6 +74,10 @@ class TcpDeviceConnection(
             disconnect()
             NetworkLogger.info("TCP_CONNECT_TIMEOUT $host:$port")
             throw ConnectionException.TcpConnectTimeout(host, port, error)
+        } catch (error: SSLHandshakeException) {
+            disconnect()
+            NetworkLogger.info("TLS_HANDSHAKE_FAILED $host:$port")
+            throw ConnectionException.InvalidMessage("TLS_PIN_MISMATCH", error)
         } catch (error: ConnectException) {
             disconnect()
             NetworkLogger.info("TCP_CONNECT_REFUSED $host:$port")
@@ -124,6 +156,27 @@ class TcpDeviceConnection(
         NetworkLogger.info("Disconnected")
     }
 }
+
+internal class PinnedSpkiTrustManager(
+    private val expectedFingerprint: String,
+) : X509TrustManager {
+    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+
+    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+        val certificate = chain?.firstOrNull() ?: throw CertificateException("Server certificate is missing.")
+        if (!matchesPinnedSpki(expectedFingerprint, certificate.publicKey.encoded)) {
+            throw CertificateException("TLS server public key pin mismatch.")
+        }
+        certificate.checkValidity()
+    }
+
+    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+}
+
+internal fun matchesPinnedSpki(expectedFingerprint: String, publicKeySpki: ByteArray): Boolean = runCatching {
+    val actual = SecurityEncoding.fingerprint(publicKeySpki)
+    SecurityEncoding.fixedTimeEquals(Base64Url.decode(expectedFingerprint), Base64Url.decode(actual))
+}.getOrDefault(false)
 
 fun Throwable.toConnectionException(): ConnectionException {
     return when (this) {

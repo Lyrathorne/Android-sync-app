@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
@@ -27,6 +29,11 @@ import com.example.devicesync.feature.devices.DevicesRoute
 import com.example.devicesync.feature.devices.DevicesViewModel
 import com.example.devicesync.feature.settings.SettingsRoute
 import com.example.devicesync.feature.settings.SettingsViewModel
+import com.example.devicesync.feature.send_file.SendFileRoute
+import com.example.devicesync.feature.send_file.SendFileViewModel
+import com.example.devicesync.feature.receive_file.ReceiveFileScreen
+import com.example.devicesync.core.transfer.IncomingFileTransferState
+import com.example.devicesync.feature.sharing.SharingScreen
 import kotlinx.coroutines.launch
 
 @Composable
@@ -34,6 +41,18 @@ fun DeviceSyncNavHost() {
     val navController = rememberNavController()
     val application = LocalContext.current.applicationContext as DeviceSyncApplication
     val container = application.container
+    val incomingState by container.incomingFileTransferManager.state.collectAsState()
+    val pendingShareText by container.sharingManager.pendingShareText.collectAsState()
+
+    LaunchedEffect(incomingState) {
+        if (incomingState is IncomingFileTransferState.Offered && navController.currentDestination?.route != AppDestination.ReceiveFile.route) {
+            navController.navigate(AppDestination.ReceiveFile.route) { launchSingleTop = true }
+        }
+    }
+    LaunchedEffect(pendingShareText) {
+        if (pendingShareText != null && navController.currentDestination?.route != AppDestination.Sharing.route)
+            navController.navigate(AppDestination.Sharing.route) { launchSingleTop = true }
+    }
 
     NavHost(
         navController = navController,
@@ -49,6 +68,7 @@ fun DeviceSyncNavHost() {
             DevicesRoute(
                 onAddDeviceClick = { navController.navigate(AppDestination.AddDevice.route) },
                 onSettingsClick = { navController.navigate(AppDestination.Settings.route) },
+                onSharingClick = { navController.navigate(AppDestination.Sharing.route) },
                 onDeviceClick = { deviceId ->
                     navController.navigate(AppDestination.DeviceDetails.createRoute(deviceId))
                 },
@@ -116,6 +136,33 @@ fun DeviceSyncNavHost() {
                 viewModel = settingsViewModel,
             )
         }
+        composable(AppDestination.SendFile.route) {
+            val sendFileViewModel: SendFileViewModel = viewModel(
+                factory = SendFileViewModel.Factory(
+                    container.outgoingTransferQueue,
+                    container.fileMetadataReader,
+                    container.connectionManager,
+                ),
+            )
+            SendFileRoute(
+                onBackClick = navController::popBackStack,
+                viewModel = sendFileViewModel,
+            )
+        }
+        composable(AppDestination.ReceiveFile.route) {
+            ReceiveFileScreen(
+                manager = container.incomingFileTransferManager,
+                onBackClick = navController::popBackStack,
+            )
+        }
+        composable(AppDestination.Sharing.route) {
+            SharingScreen(
+                container.sharingManager,
+                container.notificationPreferences,
+                container.folderSyncManager,
+                navController::popBackStack,
+            )
+        }
         composable(
             route = AppDestination.DeviceDetails.route,
             arguments = listOf(
@@ -135,6 +182,7 @@ fun DeviceSyncNavHost() {
                     ?.getString(AppDestination.DeviceDetails.deviceIdArg)
                     .orEmpty(),
                 onBackClick = navController::popBackStack,
+                onSendFileClick = { navController.navigate(AppDestination.SendFile.route) },
                 viewModel = deviceDetailsViewModel,
             )
         }

@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 fun DeviceDetailsRoute(
     deviceId: String,
     onBackClick: () -> Unit,
+    onSendFileClick: () -> Unit,
     viewModel: DeviceDetailsViewModel = viewModel(),
 ) {
     LaunchedEffect(deviceId) {
@@ -57,6 +58,7 @@ fun DeviceDetailsRoute(
     DeviceDetailsScreen(
         uiState = uiState.value,
         onBackClick = onBackClick,
+        onSendFileClick = onSendFileClick,
         onUnavailableActionClick = {},
         onConnectClick = viewModel::connect,
         onDisconnectClick = viewModel::disconnect,
@@ -71,6 +73,7 @@ fun DeviceDetailsRoute(
 fun DeviceDetailsScreen(
     uiState: DeviceDetailsUiState,
     onBackClick: () -> Unit,
+    onSendFileClick: () -> Unit,
     onUnavailableActionClick: () -> Unit,
     onConnectClick: () -> Unit,
     onDisconnectClick: () -> Unit,
@@ -135,10 +138,8 @@ fun DeviceDetailsScreen(
                     Text(stringResource(R.string.send_text))
                 }
                 Button(
-                    onClick = {
-                        onUnavailableActionClick()
-                        scope.launch { snackbarHostState.showSnackbar(featureLaterText) }
-                    },
+                    onClick = onSendFileClick,
+                    enabled = device.connectionStatus == com.example.devicesync.core.model.ConnectionStatus.CONNECTED,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.send_file))
@@ -289,6 +290,7 @@ private fun DeviceDetailsScreenPreview() {
         DeviceDetailsScreen(
             uiState = DeviceDetailsUiState(device = SampleDevices.devices.first()),
             onBackClick = {},
+            onSendFileClick = {},
             onUnavailableActionClick = {},
             onConnectClick = {},
             onDisconnectClick = {},

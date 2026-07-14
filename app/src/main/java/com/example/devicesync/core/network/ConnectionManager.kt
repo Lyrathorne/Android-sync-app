@@ -49,9 +49,11 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 import java.security.SecureRandom
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 
 class ConnectionManager(
     private val connectionFactory: () -> DeviceConnection = { TcpDeviceConnection() },
@@ -71,9 +73,9 @@ class ConnectionManager(
     private val ackConfig: AckConfig = AckConfig(),
     private val reconnectConfig: ReconnectConfig = ReconnectConfig(),
     private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
-) {
+) : FileTransferTransport, SharingTransport {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
-    val state: StateFlow<ConnectionState> = _state.asStateFlow()
+    override val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
     private val connectionAttemptMutex = Mutex()
     private val terminationMutex = Mutex()
@@ -97,6 +99,8 @@ class ConnectionManager(
     private val pendingAcks = mutableMapOf<String, ProtocolMessage>()
     private val ackRetryJobs = mutableMapOf<String, Job>()
     private var sessionSecurityState: SessionSecurityState = SessionSecurityState.Unauthenticated
+    private val fileTransferListeners = CopyOnWriteArraySet<FileTransferMessageListener>()
+    private val sharingListeners = CopyOnWriteArraySet<SharingMessageListener>()
 
     suspend fun connect(host: String, port: Int): ConnectionState.Connected {
         return connectManually(host, port)
@@ -215,6 +219,43 @@ class ConnectionManager(
         writerChannel?.send(message)
     }
 
+    override suspend fun sendFileTransferMessage(type: String, payload: JsonElement) {
+        val connected = state.value as? ConnectionState.Connected
+            ?: throw ConnectionException.InvalidMessage("File transfer requires an active connection")
+        if (SupportedCapabilities.FILE_TRANSFER_V1 !in connected.capabilities) {
+            throw ConnectionException.InvalidMessage("The connected device does not support file-transfer-v1")
+        }
+        if (sessionSecurityState != SessionSecurityState.Authenticated) {
+            throw ConnectionException.InvalidMessage("File transfer requires an authenticated connection")
+        }
+        val channel = writerChannel
+            ?: throw ConnectionException.InvalidMessage("Connection writer is unavailable")
+        channel.send(
+            ProtocolMessage(
+                protocolVersion = PROTOCOL_VERSION,
+                messageId = UUID.randomUUID().toString(),
+                type = type,
+                senderDeviceId = getAndroidDeviceId(),
+                recipientDeviceId = connected.deviceId,
+                timestampUtc = Instant.now().toString(),
+                requiresAcknowledgement = false,
+                payload = payload,
+            )
+        )
+    }
+
+    override fun setFileTransferListener(listener: FileTransferMessageListener?) {
+        fileTransferListeners.clear()
+        if (listener != null) fileTransferListeners += listener
+    }
+
+    override fun addFileTransferListener(listener: FileTransferMessageListener) { fileTransferListeners += listener }
+    override fun removeFileTransferListener(listener: FileTransferMessageListener) { fileTransferListeners -= listener }
+
+    override suspend fun sendSharingMessage(type: String, payload: JsonElement) = sendFileTransferMessage(type, payload)
+    override fun addSharingListener(listener: SharingMessageListener) { sharingListeners += listener }
+    override fun removeSharingListener(listener: SharingMessageListener) { sharingListeners -= listener }
+
     private suspend fun connectInternal(
         host: String,
         port: Int,
@@ -233,6 +274,7 @@ class ConnectionManager(
 
         return@withLock try {
             _state.value = ConnectionState.Connecting(host, port)
+            configureTlsPin(activeConnection, host, port)
             activeConnection.connect(host, port)
 
             _state.value = ConnectionState.Handshaking(host, port)
@@ -300,6 +342,19 @@ class ConnectionManager(
             maybeScheduleReconnect(connectionError)
             throw connectionError
         }
+    }
+
+    private suspend fun configureTlsPin(connection: DeviceConnection, host: String, port: Int) {
+        val devices = deviceRepository ?: return
+        val trustRepository = trustedDeviceRepository ?: return
+        val pairedDevice = devices.observeDevices().first()
+            .firstOrNull { it.host == host && it.port == port }
+            ?: throw SecurityAuthException("PAIRING_REQUIRED", null)
+        val trusted = trustRepository.getTrustedDevice(pairedDevice.id)
+            ?: throw SecurityAuthException("PAIRING_REQUIRED", pairedDevice.id)
+        val fingerprint = trusted.futureTlsCertificateFingerprint
+            ?: throw SecurityAuthException("PAIRING_REQUIRED_TLS_PIN", pairedDevice.id)
+        connection.setTlsServerSpkiFingerprint(fingerprint)
     }
 
     private fun startWriter(activeConnection: DeviceConnection, ownerSessionId: Long) {
@@ -408,6 +463,46 @@ class ConnectionManager(
             ProtocolMessageType.MESSAGE_ACK.value -> handleAck(message)
             ProtocolMessageType.CONNECTION_CLOSE.value -> handleRemoteClose(message)
             ProtocolMessageType.ERROR_PROTOCOL.value -> handleProtocolError(message)
+            ProtocolMessageType.FILE_ACCEPT.value,
+            ProtocolMessageType.FILE_REJECT.value,
+            ProtocolMessageType.FILE_RECEIVED.value,
+            ProtocolMessageType.FILE_CANCEL.value,
+            ProtocolMessageType.FILE_ERROR.value -> {
+                if (isFromActiveDevice(message)) {
+                    fileTransferListeners.forEach { it.onFileTransferMessage(message) }
+                }
+            }
+            ProtocolMessageType.FILE_CHUNK_RECEIVED.value,
+            ProtocolMessageType.FILE_RESUME_ACCEPTED.value -> {
+                if (isFromActiveDevice(message)) {
+                    fileTransferListeners.forEach { it.onFileTransferMessage(message) }
+                }
+            }
+            ProtocolMessageType.FILE_OFFER.value,
+            ProtocolMessageType.FILE_CHUNK.value,
+            ProtocolMessageType.FILE_COMPLETE.value -> {
+                if (isFromActiveDevice(message)) {
+                    fileTransferListeners.forEach { it.onFileTransferMessage(message) }
+                }
+            }
+            ProtocolMessageType.FILE_RESUME_REQUEST.value -> {
+                if (isFromActiveDevice(message)) {
+                    fileTransferListeners.forEach { it.onFileTransferMessage(message) }
+                }
+            }
+            ProtocolMessageType.CLIPBOARD_UPDATE.value,
+            ProtocolMessageType.TEXT_SHARE.value,
+            ProtocolMessageType.NOTIFICATION_POSTED.value,
+            ProtocolMessageType.NOTIFICATION_REMOVED.value -> {
+                if (isFromActiveDevice(message)) sharingListeners.forEach { it.onSharingMessage(message) }
+            }
+            ProtocolMessageType.FOLDER_MANIFEST.value,
+            ProtocolMessageType.FOLDER_PLAN.value,
+            ProtocolMessageType.FOLDER_PLAN_APPROVED.value,
+            ProtocolMessageType.FOLDER_CANCEL.value,
+            ProtocolMessageType.FOLDER_ERROR.value -> {
+                if (isFromActiveDevice(message)) sharingListeners.forEach { it.onSharingMessage(message) }
+            }
             ProtocolMessageType.CONNECTION_HELLO_ACK.value,
             ProtocolMessageType.CONNECTION_HELLO.value -> throw ConnectionException.InvalidMessage()
             else -> handleFeatureMessage(message)
@@ -450,7 +545,6 @@ class ConnectionManager(
             NetworkLogger.info("Pong received sequence=${payload.sequence}")
             waitingPong.deferred.complete(true)
             pendingPong = null
-            sessionSecurityState = SessionSecurityState.Unauthenticated
             updateConnectedDiagnostics(lastPongAtUtc = payload.receivedAtUtc, missed = 0)
         }
     }
@@ -621,6 +715,7 @@ class ConnectionManager(
             writerChannel?.close()
             writerChannel = null
             pendingPong = null
+            fileTransferListeners.forEach { it.onFileTransferDisconnected() }
 
             ackMutex.withLock {
                 ackRetryJobs.values.forEach { it.cancel() }

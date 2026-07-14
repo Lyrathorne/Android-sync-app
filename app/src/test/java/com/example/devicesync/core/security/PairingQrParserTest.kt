@@ -8,6 +8,7 @@ class PairingQrParserTest {
     private val parser = PairingQrParser(now = { Instant.parse("2026-07-06T12:00:00Z") })
     private val publicKey = "windows-test-public-key-spki".encodeToByteArray()
     private val fingerprint = SecurityEncoding.fingerprint(publicKey)
+    private val tlsFingerprint = Base64Url.encode(ByteArray(32) { (it + 1).toByte() })
 
     @Test
     fun parse_validQr() {
@@ -69,6 +70,7 @@ class PairingQrParserTest {
               "windowsDeviceName":"Gleb-PC",
               "windowsIdentityPublicKey":"${Base64Url.encode(publicKey)}",
               "windowsIdentityFingerprint":"$fingerprint",
+              "tlsServerSpkiFingerprint":"$tlsFingerprint",
               "protocolMin":$protocolMin,
               "protocolMax":$protocolMax
             }
@@ -89,6 +91,7 @@ class PairingQrParserTest {
               "dn":"Gleb-PC",
               "pk":"${Base64Url.encode(publicKey)}",
               "fp":"$fingerprint",
+              "tlsfp":"$tlsFingerprint",
               "pmin":1,
               "pmax":1
             }
