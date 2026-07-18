@@ -18,6 +18,8 @@ class DiscoveryTxtParserTest {
                 "protocolMax" to "1".encodeToByteArray(),
                 "capabilities" to "heartbeat-v1,ack-v1".encodeToByteArray(),
                 "pairingAvailable" to "false".encodeToByteArray(),
+                "addresses" to "192.168.1.40,192.168.1.41".encodeToByteArray(),
+                "endpoints" to "lan-tls|192.168.1.40|54321;lan-tls|192.168.1.41|54321".encodeToByteArray(),
                 "unknown" to "ignored".encodeToByteArray(),
             )
         )
@@ -28,6 +30,14 @@ class DiscoveryTxtParserTest {
         assertEquals(1, records.protocolMax)
         assertEquals(listOf("heartbeat-v1", "ack-v1"), records.capabilities)
         assertEquals(false, records.pairingAvailable)
+        assertEquals(listOf("192.168.1.40", "192.168.1.41"), records.hostAddresses)
+        assertEquals(
+            listOf(
+                DiscoveryEndpointRecord("lan-tls", "192.168.1.40", 54321),
+                DiscoveryEndpointRecord("lan-tls", "192.168.1.41", 54321),
+            ),
+            records.endpoints,
+        )
     }
 
     @Test

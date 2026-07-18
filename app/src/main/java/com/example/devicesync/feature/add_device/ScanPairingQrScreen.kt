@@ -23,7 +23,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,10 +34,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -53,10 +52,17 @@ fun ScanPairingQrScreen(
 ) {
     val context = LocalContext.current
     var permissionGranted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA,
+            ) == PackageManager.PERMISSION_GRANTED,
+        )
     }
     var permissionRequested by remember { mutableStateOf(false) }
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
         permissionRequested = true
         permissionGranted = granted
     }
@@ -69,11 +75,17 @@ fun ScanPairingQrScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         ) {
             Text("Доступ к камере", style = MaterialTheme.typography.headlineSmall)
-            Text("Камера используется только для сканирования QR-кода, показанного в DeviceSync на компьютере. Фото и видео не сохраняются.")
+            Text(
+                "Камера используется только для сканирования QR-кода, " +
+                    "показанного в DeviceSync на компьютере. Фото и видео не сохраняются.",
+            )
             if (permissionRequested) {
                 Text("Разрешение камеры не выдано.", color = MaterialTheme.colorScheme.error)
             }
-            Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("Продолжить")
             }
             OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
@@ -108,10 +120,12 @@ private fun QrCameraPreview(
         )
     }
     var consumed by remember { mutableStateOf(false) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
             consumed = true
+            cameraProvider?.unbindAll()
             scanner.close()
             executor.shutdown()
         }
@@ -121,53 +135,60 @@ private fun QrCameraPreview(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                val previewView = PreviewView(ctx)
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                cameraProviderFuture.addListener(
-                    {
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
-                        val analysis = ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .build()
-                            .also { imageAnalysis ->
-                                imageAnalysis.setAnalyzer(executor) { proxy ->
-                                    val image = proxy.image
-                                    if (image == null || consumed) {
-                                        proxy.close()
-                                        return@setAnalyzer
-                                    }
-                                    val input = InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
-                                    scanner.process(input)
-                                        .addOnSuccessListener { barcodes ->
-                                            val raw = barcodes.firstOrNull { it.rawValue != null }?.rawValue
-                                            if (raw != null && !consumed) {
-                                                consumed = onQrScanned(raw)
-                                            }
-                                        }
-                                        .addOnCompleteListener { proxy.close() }
-                                }
+                PreviewView(ctx).also { previewView ->
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                    cameraProviderFuture.addListener(
+                        {
+                            if (consumed) return@addListener
+                            val provider = cameraProviderFuture.get()
+                            cameraProvider = provider
+                            val preview = Preview.Builder().build().also {
+                                it.setSurfaceProvider(previewView.surfaceProvider)
                             }
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            analysis,
-                        )
-                    },
-                    ContextCompat.getMainExecutor(context),
-                )
-                previewView
+                            val analysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+                                .also { imageAnalysis ->
+                                    imageAnalysis.setAnalyzer(executor) { proxy ->
+                                        val image = proxy.image
+                                        if (image == null || consumed) {
+                                            proxy.close()
+                                            return@setAnalyzer
+                                        }
+                                        val input = InputImage.fromMediaImage(
+                                            image,
+                                            proxy.imageInfo.rotationDegrees,
+                                        )
+                                        scanner.process(input)
+                                            .addOnSuccessListener { barcodes ->
+                                                val raw = barcodes
+                                                    .firstOrNull { it.rawValue != null }
+                                                    ?.rawValue
+                                                if (raw != null && !consumed) {
+                                                    consumed = onQrScanned(raw)
+                                                }
+                                            }
+                                            .addOnCompleteListener { proxy.close() }
+                                    }
+                                }
+                            provider.unbindAll()
+                            provider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview,
+                                analysis,
+                            )
+                        },
+                        ContextCompat.getMainExecutor(context),
+                    )
+                }
             },
         )
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val sizePx = this.size.minDimension * 0.64f
+            val sizePx = size.minDimension * 0.64f
             drawRect(
                 color = Color.White,
-                topLeft = Offset((this.size.width - sizePx) / 2f, (this.size.height - sizePx) / 2f),
+                topLeft = Offset((size.width - sizePx) / 2f, (size.height - sizePx) / 2f),
                 size = Size(sizePx, sizePx),
                 style = Stroke(width = 4.dp.toPx()),
             )

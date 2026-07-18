@@ -39,6 +39,8 @@ sealed interface ConnectionState {
         val lastPongAtUtc: String? = null,
         val missedPongs: Int = 0,
         val pendingMessageCount: Int = 0,
+        val transportKind: TransportKind = TransportKind.LAN,
+        val slowTransport: Boolean = false,
     ) : ConnectionState
 
     data class Reconnecting(
@@ -47,6 +49,7 @@ sealed interface ConnectionState {
         val port: Int,
         val attempt: Int,
         val nextRetryMessage: String,
+        val transportKind: TransportKind = TransportKind.LAN,
     ) : ConnectionState
 
     data object NetworkUnavailable : ConnectionState

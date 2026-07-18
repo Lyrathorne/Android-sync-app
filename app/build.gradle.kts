@@ -6,6 +6,17 @@ plugins {
     alias(libs.plugins.kotlin.kapt)
 }
 
+val releaseStoreFile = providers.environmentVariable("DEVICESYNC_ANDROID_KEYSTORE").orNull
+val releaseStorePassword = providers.environmentVariable("DEVICESYNC_ANDROID_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("DEVICESYNC_ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("DEVICESYNC_ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.example.devicesync"
     compileSdk = 36
@@ -14,15 +25,35 @@ android {
         applicationId = "com.example.devicesync"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 10000
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(checkNotNull(releaseStoreFile))
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            buildConfigField("boolean", "DEBUG_ENDPOINTS_ENABLED", "true")
+        }
         release {
-            isMinifyEnabled = false
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            buildConfigField("boolean", "DEBUG_ENDPOINTS_ENABLED", "false")
+            // Local release builds remain installable without production secrets. CI/store
+            // builds replace this with the environment-backed release signing config above.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -54,6 +85,10 @@ kapt {
 }
 
 dependencies {
+    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
+    implementation("org.bouncycastle:bctls-jdk18on:1.84")
+    implementation(project(":keyboard-engine"))
+    implementation(project(":keyboard-ime"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -79,7 +114,12 @@ dependencies {
     implementation(libs.androidx.compose.material3)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }

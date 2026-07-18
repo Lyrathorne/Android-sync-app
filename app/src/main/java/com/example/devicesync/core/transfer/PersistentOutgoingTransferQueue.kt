@@ -9,6 +9,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
+import android.net.Uri
 
 @Serializable
 data class AndroidOutgoingQueueItem(
@@ -60,6 +61,7 @@ class PersistentOutgoingTransferQueue(
     private val store: AndroidOutgoingQueueStore,
     private val scope: CoroutineScope,
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val historyRepository: TransferHistoryRepository? = null,
 ) : OutgoingFileTransferController {
     override val state: StateFlow<FileTransferState> = manager.state
     private val signal = Channel<Unit>(Channel.CONFLATED)
@@ -113,6 +115,7 @@ class PersistentOutgoingTransferQueue(
                 item = item.copy(state = "sending", updatedAtMillis = nowMillis())
                 replace(item)
                 store.upsert(item)
+                recordHistory(item, "sending")
                 val resume = if (item.sha256 != null) AndroidOutgoingResumePoint(
                     item.transferId, item.sha256, item.acknowledgedOffset, item.nextChunkIndex,
                 ) else null
@@ -122,12 +125,14 @@ class PersistentOutgoingTransferQueue(
                 when (val result = manager.state.value) {
                     is FileTransferState.Completed -> {
                         replace(item.copy(state = "completed", updatedAtMillis = nowMillis()))
+                        recordHistory(item, "completed", result.savedFileName)
                         store.delete(item.transferId)
                     }
                     is FileTransferState.Rejected, FileTransferState.Cancelled -> {
                         val terminal = item.copy(state = "cancelled", updatedAtMillis = nowMillis(), lastError = result.toString())
                         replace(terminal)
                         store.upsert(terminal)
+                        recordHistory(terminal, "cancelled", terminal.lastError)
                     }
                     else -> scheduleRetry(item, result.toString())
                 }
@@ -150,6 +155,7 @@ class PersistentOutgoingTransferQueue(
         )
         replace(updated)
         store.upsert(updated)
+        recordHistory(updated, updated.state, updated.lastError)
         if (attempts >= 5) return
         delay(1000L shl (attempts - 1))
         updated = updated.copy(state = "queued", updatedAtMillis = nowMillis())
@@ -160,5 +166,18 @@ class PersistentOutgoingTransferQueue(
     private fun replace(item: AndroidOutgoingQueueItem) = synchronized(items) {
         val index = items.indexOfFirst { it.transferId == item.transferId }
         if (index >= 0) items[index] = item else items += item
+    }
+
+    private fun recordHistory(item: AndroidOutgoingQueueItem, status: String, detail: String? = null) {
+        historyRepository?.record(
+            TransferHistoryEntry(
+                transferId = item.transferId,
+                direction = "outgoing",
+                fileName = Uri.parse(item.uri).lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "File" },
+                status = status,
+                updatedAtMillis = nowMillis(),
+                detail = detail,
+            )
+        )
     }
 }

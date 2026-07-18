@@ -53,6 +53,8 @@ data class AuthChallengePayload(
     val windowsIdentityFingerprint: String,
     val serverSignature: String,
     val helloMessageId: String,
+    val acceptedProtocolVersion: Int = 1,
+    val capabilities: List<String> = emptyList(),
 )
 
 @Serializable
@@ -64,4 +66,6 @@ data class AuthResponsePayload(
 @Serializable
 data class AuthAcceptedPayload(
     val status: String,
+    val acceptedProtocolVersion: Int = 1,
+    val capabilities: List<String> = emptyList(),
 )

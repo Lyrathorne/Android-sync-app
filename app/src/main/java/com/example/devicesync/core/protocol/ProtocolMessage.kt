@@ -12,6 +12,7 @@ data class ProtocolMessage(
     val recipientDeviceId: String? = null,
     val timestampUtc: String,
     val correlationId: String? = null,
+    val originDeviceId: String? = null,
     val requiresAcknowledgement: Boolean = false,
     val payload: JsonElement,
 )

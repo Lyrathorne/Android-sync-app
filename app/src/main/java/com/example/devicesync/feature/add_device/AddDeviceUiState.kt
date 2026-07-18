@@ -3,6 +3,7 @@ package com.example.devicesync.feature.add_device
 import com.example.devicesync.core.discovery.DiscoveredDevice
 import com.example.devicesync.core.discovery.DiscoveryDiagnostics
 import com.example.devicesync.core.discovery.DiscoveryState
+import com.example.devicesync.core.network.BluetoothFallbackCandidate
 
 data class AddDeviceUiState(
     val discoveryState: DiscoveryState = DiscoveryState.Idle,
@@ -17,6 +18,8 @@ data class AddDeviceUiState(
     val manualConnectionStatus: ManualConnectionStatus = ManualConnectionStatus.Idle,
     val connectedDeviceId: String? = null,
     val discoveryConnectionError: String? = null,
+    val bluetoothCandidates: List<BluetoothFallbackCandidate> = emptyList(),
+    val bluetoothStatus: String? = null,
 )
 
 enum class ManualConnectionError {

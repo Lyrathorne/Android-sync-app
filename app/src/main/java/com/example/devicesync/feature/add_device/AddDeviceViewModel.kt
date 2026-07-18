@@ -13,6 +13,8 @@ import com.example.devicesync.core.network.ConnectionException
 import com.example.devicesync.core.network.ConnectionManager
 import com.example.devicesync.core.network.ConnectionState
 import com.example.devicesync.core.network.NetworkLogger
+import com.example.devicesync.core.network.BluetoothFallbackCandidate
+import com.example.devicesync.core.network.BluetoothFallbackManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,6 +30,7 @@ class AddDeviceViewModel(
     private val deviceRepository: DeviceRepository? = null,
     private val discoveryService: DeviceDiscoveryService? = null,
     private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
+    private val bluetoothFallbackManager: BluetoothFallbackManager? = null,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AddDeviceUiState())
     val uiState: StateFlow<AddDeviceUiState> = _uiState.asStateFlow()
@@ -142,7 +145,11 @@ class AddDeviceViewModel(
             for (host in orderedAddresses) {
                 try {
                     discoveryService?.stopDiscovery()
-                    val connected = connectionManager.connect(host, device.port)
+                    val connected = if (device.deviceId != null) {
+                        connectionManager.connectPairedDevice(device.deviceId, listOf(host), device.port)
+                    } else {
+                        connectionManager.connect(host, device.port)
+                    }
                     if (device.deviceId != null && device.deviceId != connected.deviceId) {
                         NetworkLogger.error("TXT device ID mismatch")
                         connectionManager.disconnect()
@@ -171,6 +178,49 @@ class AddDeviceViewModel(
             _uiState.update {
                 it.copy(discoveryConnectionError = lastError?.message ?: "Не удалось подключиться к найденному компьютеру.")
             }
+        }
+    }
+
+    fun refreshBluetoothCandidates() {
+        viewModelScope.launch {
+            val manager = bluetoothFallbackManager
+            if (manager == null || !manager.isSupported()) {
+                _uiState.update { it.copy(bluetoothStatus = "Bluetooth is not available on this phone.") }
+                return@launch
+            }
+            if (!manager.hasPermission()) {
+                _uiState.update { it.copy(bluetoothStatus = "Allow Nearby devices to use Bluetooth fallback.") }
+                return@launch
+            }
+            val candidates = manager.candidates()
+            _uiState.update {
+                it.copy(
+                    bluetoothCandidates = candidates,
+                    bluetoothStatus = if (candidates.isEmpty()) {
+                        "Pair the phone and computer in Android and Windows Bluetooth settings first."
+                    } else {
+                        "Bluetooth is a slow fallback for clipboard, commands, and files up to 2 MiB."
+                    },
+                )
+            }
+        }
+    }
+
+    fun connectBluetooth(candidate: BluetoothFallbackCandidate) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(bluetoothStatus = "Connecting through secure Bluetooth fallback...") }
+            runCatching { bluetoothFallbackManager?.connect(candidate) ?: error("Bluetooth is unavailable.") }
+                .onSuccess { connected ->
+                    _uiState.update {
+                        it.copy(
+                            bluetoothStatus = "Connected through slow Bluetooth fallback.",
+                            connectedDeviceId = connected.deviceId,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(bluetoothStatus = error.message ?: "Bluetooth connection failed.") }
+                }
         }
     }
 
@@ -243,6 +293,7 @@ class AddDeviceViewModel(
         private val deviceRepository: DeviceRepository,
         private val connectionManager: ConnectionManager,
         private val discoveryService: DeviceDiscoveryService,
+        private val bluetoothFallbackManager: BluetoothFallbackManager? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -250,6 +301,7 @@ class AddDeviceViewModel(
                 connectionManager = connectionManager,
                 deviceRepository = deviceRepository,
                 discoveryService = discoveryService,
+                bluetoothFallbackManager = bluetoothFallbackManager,
             ) as T
         }
     }

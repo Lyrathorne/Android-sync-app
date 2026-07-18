@@ -3,6 +3,9 @@ package com.example.devicesync.core.security
 import com.example.devicesync.BuildConfig
 import com.example.devicesync.core.discovery.DEVICESYNC_PROTOCOL_VERSION
 import com.example.devicesync.core.discovery.DiscoveryAddressSelector
+import com.example.devicesync.core.data.DeviceRepository
+import com.example.devicesync.core.data.PairedDevice
+import com.example.devicesync.core.model.ConnectionStatus
 import com.example.devicesync.core.network.ConnectionException
 import com.example.devicesync.core.network.DeviceConnection
 import com.example.devicesync.core.network.NetworkLogger
@@ -16,6 +19,7 @@ import com.example.devicesync.core.protocol.ProtocolMessage
 import com.example.devicesync.core.protocol.ProtocolMessageType
 import com.example.devicesync.core.protocol.ProtocolSerializer
 import com.example.devicesync.core.settings.DeviceIdentityRepository
+import com.example.devicesync.core.settings.AppSettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +70,8 @@ class DefaultPairingCoordinator(
     private val identityRepository: DeviceIdentityRepository,
     private val identityKeyProvider: DeviceIdentityKeyProvider,
     private val trustedDeviceRepository: TrustedDeviceRepository,
+    private val deviceRepository: DeviceRepository? = null,
+    private val settingsRepository: AppSettingsRepository? = null,
     private val connectionFactory: () -> DeviceConnection = { TcpDeviceConnection() },
     private val pairingProtocol: PairingProtocol = PairingProtocol(),
     private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
@@ -321,6 +327,21 @@ class DefaultPairingCoordinator(
                 revokedAt = null,
             )
         )
+        val preferredHost = addressSelector.orderedUsableAddresses(pairing.payload.hostAddresses).first()
+        deviceRepository?.saveDevice(
+            PairedDevice(
+                id = pairing.payload.windowsDeviceId,
+                name = pairing.payload.windowsDeviceName,
+                host = preferredHost,
+                port = pairing.payload.port,
+                protocolVersion = DEVICESYNC_PROTOCOL_VERSION,
+                capabilities = emptyList(),
+                lastConnectedAt = null,
+                isAutoConnectEnabled = true,
+                connectionStatus = ConnectionStatus.OFFLINE,
+            )
+        )
+        settingsRepository?.setLastSelectedDeviceId(pairing.payload.windowsDeviceId)
         pairing.connection.send(
             ProtocolMessage(
                 protocolVersion = DEVICESYNC_PROTOCOL_VERSION,

@@ -49,6 +49,7 @@ class DataStoreAppSettingsRepository(
         AppSettings(
             autoConnectEnabled = preferences[Keys.AutoConnectEnabled] ?: true,
             restoreConnectionEnabled = preferences[Keys.RestoreConnectionEnabled] ?: true,
+            backgroundWorkEnabled = preferences[Keys.BackgroundWorkEnabled] ?: false,
             lastSelectedDeviceId = preferences[Keys.LastSelectedDeviceId],
             themeMode = preferences[Keys.ThemeMode]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                 ?: ThemeMode.SYSTEM,
@@ -61,6 +62,10 @@ class DataStoreAppSettingsRepository(
 
     override suspend fun setRestoreConnectionEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.RestoreConnectionEnabled] = enabled }
+    }
+
+    override suspend fun setBackgroundWorkEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.BackgroundWorkEnabled] = enabled }
     }
 
     override suspend fun setLastSelectedDeviceId(deviceId: String?) {
@@ -84,6 +89,7 @@ private object Keys {
     val LastSelectedDeviceId = stringPreferencesKey("last_selected_device_id")
     val AutoConnectEnabled = booleanPreferencesKey("auto_connect_enabled")
     val RestoreConnectionEnabled = booleanPreferencesKey("restore_connection_enabled")
+    val BackgroundWorkEnabled = booleanPreferencesKey("background_work_enabled")
     val ThemeMode = stringPreferencesKey("theme_mode")
 }
 

@@ -10,6 +10,7 @@ import com.example.devicesync.core.model.ConnectionStatus
 import com.example.devicesync.core.protocol.ConnectionClosePayload
 import com.example.devicesync.core.protocol.ConnectionHelloAckPayload
 import com.example.devicesync.core.protocol.ConnectionHelloPayload
+import com.example.devicesync.core.protocol.CapabilityNegotiator
 import com.example.devicesync.core.protocol.AuthAcceptedPayload
 import com.example.devicesync.core.protocol.AuthChallengePayload
 import com.example.devicesync.core.protocol.AuthResponsePayload
@@ -20,6 +21,7 @@ import com.example.devicesync.core.protocol.ProtocolErrorPayload
 import com.example.devicesync.core.protocol.ProtocolMessage
 import com.example.devicesync.core.protocol.ProtocolMessageType
 import com.example.devicesync.core.protocol.ProtocolSerializer
+import com.example.devicesync.core.protocol.ProtocolVersionNegotiator
 import com.example.devicesync.core.security.Base64Url
 import com.example.devicesync.core.security.DeviceIdentityKeyProvider
 import com.example.devicesync.core.security.SecurityEncoding
@@ -42,6 +44,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -57,6 +60,7 @@ import java.util.concurrent.CopyOnWriteArraySet
 
 class ConnectionManager(
     private val connectionFactory: () -> DeviceConnection = { TcpDeviceConnection() },
+    private val bluetoothConnectionFactory: (() -> DeviceConnection)? = null,
     private val androidDeviceId: String = UUID.randomUUID().toString(),
     private val androidDeviceName: String = android.os.Build.MODEL.orEmpty().ifBlank { "Android device" },
     private val appVersion: String = BuildConfig.VERSION_NAME,
@@ -66,14 +70,14 @@ class ConnectionManager(
     private val outgoingMessageQueue: OutgoingMessageQueue? = null,
     private val processedMessageRepository: ProcessedMessageRepository? = null,
     private val settingsRepository: AppSettingsRepository? = null,
-    private val networkMonitor: NetworkMonitor? = null,
+    private val networkMonitor: NetworkStateSource? = null,
     private val identityKeyProvider: DeviceIdentityKeyProvider? = null,
     private val trustedDeviceRepository: TrustedDeviceRepository? = null,
     private val heartbeatConfig: HeartbeatConfig = HeartbeatConfig(),
     private val ackConfig: AckConfig = AckConfig(),
     private val reconnectConfig: ReconnectConfig = ReconnectConfig(),
     private val addressSelector: DiscoveryAddressSelector = DiscoveryAddressSelector(),
-) : FileTransferTransport, SharingTransport {
+) : FileTransferTransport, SharingTransport, MediaCatalogTransport {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     override val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
@@ -90,7 +94,10 @@ class ConnectionManager(
     private var startupConnectJob: Job? = null
     private var manualDisconnect = false
     private var activeDevice: PairedDevice? = null
+    private var activeEndpoint: TransportEndpoint? = null
+    private var bluetoothFallbackAddress: String? = null
     private var remoteDeviceId: String? = null
+    private var localDeviceId: String? = null
     private var pingSequence = 0L
     private var missedPongs = 0
     private var pendingPong: PendingPong? = null
@@ -101,6 +108,24 @@ class ConnectionManager(
     private var sessionSecurityState: SessionSecurityState = SessionSecurityState.Unauthenticated
     private val fileTransferListeners = CopyOnWriteArraySet<FileTransferMessageListener>()
     private val sharingListeners = CopyOnWriteArraySet<SharingMessageListener>()
+    private val mediaCatalogListeners = CopyOnWriteArraySet<MediaCatalogMessageListener>()
+
+    init {
+        networkMonitor?.let { monitor ->
+            scope.launch {
+                var previous = monitor.networkState.value
+                monitor.networkState.collect { current ->
+                    val connected = _state.value is ConnectionState.Connected
+                    val restart = NetworkTransitionPolicy.requiresFreshConnection(previous, current, connected)
+                    previous = current
+                    if (restart) {
+                        NetworkLogger.info("Network changed; reconnecting authenticated session")
+                        terminateSession(SessionTerminationReason.NetworkChanged, reconnectAllowed = true)
+                    }
+                }
+            }
+        }
+    }
 
     suspend fun connect(host: String, port: Int): ConnectionState.Connected {
         return connectManually(host, port)
@@ -124,6 +149,30 @@ class ConnectionManager(
         throw lastError ?: ConnectionException.InvalidAddress()
     }
 
+    suspend fun connectPairedDevice(
+        deviceId: String,
+        hostAddresses: List<String>,
+        port: Int,
+    ): ConnectionState.Connected {
+        val repository = deviceRepository ?: throw ConnectionException.InvalidMessage("PAIRING_REQUIRED")
+        activeDevice = repository.getDevice(deviceId)
+            ?: throw ConnectionException.InvalidMessage("PAIRING_REQUIRED")
+        manualDisconnect = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        val orderedAddresses = addressSelector.orderedUsableAddresses(hostAddresses)
+        if (orderedAddresses.isEmpty()) throw ConnectionException.InvalidAddress()
+        var lastError: ConnectionException? = null
+        for (host in orderedAddresses) {
+            try {
+                return connectInternal(host, port, ConnectionAttemptSource.PairedDiscovery)
+            } catch (error: ConnectionException) {
+                lastError = error
+            }
+        }
+        throw lastError ?: ConnectionException.InvalidAddress()
+    }
+
     suspend fun connectManually(host: String, port: Int): ConnectionState.Connected {
         manualDisconnect = false
         reconnectJob?.cancel()
@@ -132,8 +181,20 @@ class ConnectionManager(
         return connectInternal(host, port, ConnectionAttemptSource.Manual)
     }
 
+    suspend fun connectBluetooth(deviceId: String, bluetoothAddress: String): ConnectionState.Connected {
+        val repository = deviceRepository ?: throw ConnectionException.InvalidMessage("PAIRING_REQUIRED")
+        activeDevice = repository.getDevice(deviceId)
+            ?: throw ConnectionException.InvalidMessage("PAIRING_REQUIRED")
+        manualDisconnect = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        bluetoothFallbackAddress = bluetoothAddress
+        return connectInternal("bt://$bluetoothAddress", 0, ConnectionAttemptSource.Manual)
+    }
+
     fun startStartupAutoConnect() {
         if (startupConnectJob?.isActive == true) return
+        if (manualDisconnect) return
         val settingsRepository = settingsRepository ?: return
         val deviceRepository = deviceRepository ?: return
         startupConnectJob = scope.launch {
@@ -146,6 +207,7 @@ class ConnectionManager(
                     settingsRepository.setLastSelectedDeviceId(null)
                     return@launch
                 }
+                activeDevice = device
                 val monitor = networkMonitor
                 if (monitor != null) {
                     monitor.networkState.first { state -> state is NetworkState.Available }
@@ -157,6 +219,7 @@ class ConnectionManager(
                 val connectionError = error.toConnectionException()
                 NetworkLogger.error("Startup auto-connect failed", connectionError)
                 _state.value = ConnectionState.Failed(connectionError.message.orEmpty())
+                maybeScheduleReconnect(connectionError)
             }
         }
     }
@@ -167,6 +230,7 @@ class ConnectionManager(
         reconnectJob = null
         NetworkLogger.info("Manual disconnect")
         terminateSession(SessionTerminationReason.ManualDisconnect, reconnectAllowed = false)
+        settingsRepository?.setLastSelectedDeviceId(null)
     }
 
     suspend fun disconnectDevice(deviceId: String) {
@@ -220,28 +284,43 @@ class ConnectionManager(
     }
 
     override suspend fun sendFileTransferMessage(type: String, payload: JsonElement) {
+        sendAuthenticatedMessage(
+            type = type,
+            payload = payload,
+            requiredCapability = SupportedCapabilities.FILE_TRANSFER_V1,
+            featureName = "File transfer",
+        )
+    }
+
+    private suspend fun sendAuthenticatedMessage(
+        type: String,
+        payload: JsonElement,
+        requiredCapability: String,
+        featureName: String,
+        requiresAcknowledgement: Boolean = false,
+    ) {
         val connected = state.value as? ConnectionState.Connected
-            ?: throw ConnectionException.InvalidMessage("File transfer requires an active connection")
-        if (SupportedCapabilities.FILE_TRANSFER_V1 !in connected.capabilities) {
-            throw ConnectionException.InvalidMessage("The connected device does not support file-transfer-v1")
+            ?: throw ConnectionException.InvalidMessage("$featureName requires an active connection")
+        if (requiredCapability !in connected.capabilities) {
+            throw ConnectionException.InvalidMessage("The connected device does not support $requiredCapability")
         }
         if (sessionSecurityState != SessionSecurityState.Authenticated) {
-            throw ConnectionException.InvalidMessage("File transfer requires an authenticated connection")
+            throw ConnectionException.InvalidMessage("$featureName requires an authenticated connection")
         }
         val channel = writerChannel
             ?: throw ConnectionException.InvalidMessage("Connection writer is unavailable")
-        channel.send(
-            ProtocolMessage(
+        val message = ProtocolMessage(
                 protocolVersion = PROTOCOL_VERSION,
                 messageId = UUID.randomUUID().toString(),
                 type = type,
                 senderDeviceId = getAndroidDeviceId(),
                 recipientDeviceId = connected.deviceId,
                 timestampUtc = Instant.now().toString(),
-                requiresAcknowledgement = false,
+                requiresAcknowledgement = requiresAcknowledgement,
                 payload = payload,
-            )
         )
+        NetworkLogger.info("Authenticated message queued type=$type acknowledgement=$requiresAcknowledgement")
+        if (requiresAcknowledgement) sendQueued(message) else channel.send(message)
     }
 
     override fun setFileTransferListener(listener: FileTransferMessageListener?) {
@@ -252,9 +331,42 @@ class ConnectionManager(
     override fun addFileTransferListener(listener: FileTransferMessageListener) { fileTransferListeners += listener }
     override fun removeFileTransferListener(listener: FileTransferMessageListener) { fileTransferListeners -= listener }
 
-    override suspend fun sendSharingMessage(type: String, payload: JsonElement) = sendFileTransferMessage(type, payload)
+    override suspend fun sendSharingMessage(type: String, payload: JsonElement) {
+        val requiredCapability = when (type) {
+            ProtocolMessageType.CLIPBOARD_UPDATE.value -> SupportedCapabilities.CLIPBOARD_V1
+            ProtocolMessageType.TEXT_SHARE.value -> SupportedCapabilities.TEXT_SHARE_V1
+            ProtocolMessageType.NOTIFICATION_POSTED.value,
+            ProtocolMessageType.NOTIFICATION_UPDATED.value,
+            ProtocolMessageType.NOTIFICATION_REMOVED.value,
+            ProtocolMessageType.NOTIFICATION_ACTION_INVOKE.value,
+            ProtocolMessageType.NOTIFICATION_ACTION_RESULT.value -> SupportedCapabilities.NOTIFICATIONS_V1
+            ProtocolMessageType.FOLDER_MANIFEST.value,
+            ProtocolMessageType.FOLDER_PLAN.value,
+            ProtocolMessageType.FOLDER_PLAN_APPROVED.value,
+            ProtocolMessageType.FOLDER_CANCEL.value,
+            ProtocolMessageType.FOLDER_ERROR.value -> SupportedCapabilities.FOLDER_SYNC_V1
+            else -> throw ConnectionException.InvalidMessage("Unsupported sharing message type: $type")
+        }
+        sendAuthenticatedMessage(type, payload, requiredCapability, "Sharing", requiresAcknowledgement = true)
+    }
     override fun addSharingListener(listener: SharingMessageListener) { sharingListeners += listener }
     override fun removeSharingListener(listener: SharingMessageListener) { sharingListeners -= listener }
+
+    override suspend fun sendCatalogMessage(type: String, payload: JsonElement) {
+        val requiredCapability = when (type) {
+            ProtocolMessageType.CATALOG_THUMBNAIL_RESPONSE.value -> SupportedCapabilities.THUMBNAILS_V1
+            ProtocolMessageType.CATALOG_PAGE.value,
+            ProtocolMessageType.CATALOG_CHANGED.value,
+            ProtocolMessageType.CATALOG_PERMISSION.value,
+            ProtocolMessageType.CATALOG_ERROR.value,
+            ProtocolMessageType.CATALOG_CANCEL.value -> SupportedCapabilities.MEDIA_CATALOG_V1
+            else -> throw ConnectionException.InvalidMessage("Unsupported catalog message type: $type")
+        }
+        sendAuthenticatedMessage(type, payload, requiredCapability, "Media catalog")
+    }
+
+    override fun addMediaCatalogListener(listener: MediaCatalogMessageListener) { mediaCatalogListeners += listener }
+    override fun removeMediaCatalogListener(listener: MediaCatalogMessageListener) { mediaCatalogListeners -= listener }
 
     private suspend fun connectInternal(
         host: String,
@@ -267,15 +379,22 @@ class ConnectionManager(
         }
         terminateSession(SessionTerminationReason.NewConnectionAttempt, reconnectAllowed = false)
 
-        val activeConnection = connectionFactory()
+        val endpoint = TransportEndpoint.parse(host, port)
+        val activeConnection = if (endpoint.kind == TransportKind.BLUETOOTH_RFCOMM) {
+            bluetoothConnectionFactory?.invoke()
+                ?: throw ConnectionException.InvalidMessage("BLUETOOTH_UNAVAILABLE")
+        } else {
+            connectionFactory()
+        }
+        activeEndpoint = endpoint
         connection = activeConnection
         val currentSessionId = ++sessionId
         terminatedSessionId = 0L
 
         return@withLock try {
             _state.value = ConnectionState.Connecting(host, port)
-            configureTlsPin(activeConnection, host, port)
-            activeConnection.connect(host, port)
+            configureTlsPin(activeConnection, host, port, source)
+            activeConnection.connect(endpoint)
 
             _state.value = ConnectionState.Handshaking(host, port)
             NetworkLogger.info("Handshake started session=$currentSessionId")
@@ -297,21 +416,40 @@ class ConnectionManager(
             activeConnection.onHandshakeComplete()
 
             remoteDeviceId = connected.deviceId
-            activeDevice = connected.toPairedDevice()
+            activeDevice = if (endpoint.kind == TransportKind.BLUETOOTH_RFCOMM) {
+                activeDevice?.copy(
+                    name = connected.deviceName,
+                    protocolVersion = connected.acceptedProtocolVersion,
+                    capabilities = connected.capabilities,
+                    lastConnectedAt = Instant.now(),
+                    connectionStatus = ConnectionStatus.CONNECTED,
+                ) ?: connected.toPairedDevice()
+            } else {
+                connected.toPairedDevice()
+            }
             deviceRepository?.saveDevice(activeDevice ?: connected.toPairedDevice())
             settingsRepository?.setLastSelectedDeviceId(connected.deviceId)
-            reconnectJob?.cancel()
+            if (source != ConnectionAttemptSource.Reconnect) {
+                reconnectJob?.cancel()
+            }
             reconnectJob = null
             sessionSecurityState = SessionSecurityState.Authenticated
             _state.value = ConnectionState.Authenticated(connected.deviceId, connected.deviceName)
-            _state.value = connected.copy(reconnectAttempt = 0)
+            val profile = TransportProfile.forKind(endpoint.kind)
+            val finalConnected = connected.copy(
+                reconnectAttempt = 0,
+                transportKind = endpoint.kind,
+                slowTransport = profile.slow,
+                capabilities = connected.capabilities.filterNot(profile.disabledCapabilities::contains),
+            )
+            _state.value = finalConnected
 
             startWriter(activeConnection, currentSessionId)
             startReader(activeConnection, currentSessionId)
             startHeartbeat(connected.deviceId, currentSessionId)
             restorePendingMessages(connected.deviceId)
             NetworkLogger.info("Handshake completed session=$currentSessionId device=${connected.deviceName}")
-            connected
+            finalConnected
         } catch (error: CancellationException) {
             withContext(NonCancellable) {
                 activeConnection.disconnect()
@@ -344,11 +482,21 @@ class ConnectionManager(
         }
     }
 
-    private suspend fun configureTlsPin(connection: DeviceConnection, host: String, port: Int) {
+    private suspend fun configureTlsPin(
+        connection: DeviceConnection,
+        host: String,
+        port: Int,
+        source: ConnectionAttemptSource,
+    ) {
         val devices = deviceRepository ?: return
         val trustRepository = trustedDeviceRepository ?: return
-        val pairedDevice = devices.observeDevices().first()
-            .firstOrNull { it.host == host && it.port == port }
+        val endpoint = TransportEndpoint.parse(host, port)
+        val pairedDevice = if (endpoint.kind == TransportKind.BLUETOOTH_RFCOMM ||
+            source == ConnectionAttemptSource.Reconnect || source == ConnectionAttemptSource.PairedDiscovery) {
+            activeDevice
+        } else {
+            devices.observeDevices().first().firstOrNull { it.host == host && it.port == port }
+        }
             ?: throw SecurityAuthException("PAIRING_REQUIRED", null)
         val trusted = trustRepository.getTrustedDevice(pairedDevice.id)
             ?: throw SecurityAuthException("PAIRING_REQUIRED", pairedDevice.id)
@@ -493,15 +641,34 @@ class ConnectionManager(
             ProtocolMessageType.CLIPBOARD_UPDATE.value,
             ProtocolMessageType.TEXT_SHARE.value,
             ProtocolMessageType.NOTIFICATION_POSTED.value,
-            ProtocolMessageType.NOTIFICATION_REMOVED.value -> {
-                if (isFromActiveDevice(message)) sharingListeners.forEach { it.onSharingMessage(message) }
+            ProtocolMessageType.NOTIFICATION_UPDATED.value,
+            ProtocolMessageType.NOTIFICATION_REMOVED.value,
+            ProtocolMessageType.NOTIFICATION_ACTION_INVOKE.value,
+            ProtocolMessageType.NOTIFICATION_ACTION_RESULT.value -> {
+                if (isFromActiveDevice(message)) {
+                    NetworkLogger.info("Sharing message received type=${message.type}")
+                    sharingListeners.forEach { it.onSharingMessage(message) }
+                    if (message.requiresAcknowledgement) sendAck(message, "processed")
+                }
             }
             ProtocolMessageType.FOLDER_MANIFEST.value,
             ProtocolMessageType.FOLDER_PLAN.value,
             ProtocolMessageType.FOLDER_PLAN_APPROVED.value,
             ProtocolMessageType.FOLDER_CANCEL.value,
             ProtocolMessageType.FOLDER_ERROR.value -> {
-                if (isFromActiveDevice(message)) sharingListeners.forEach { it.onSharingMessage(message) }
+                if (isFromActiveDevice(message)) {
+                    sharingListeners.forEach { it.onSharingMessage(message) }
+                    if (message.requiresAcknowledgement) sendAck(message, "processed")
+                }
+            }
+            ProtocolMessageType.CATALOG_QUERY.value,
+            ProtocolMessageType.CATALOG_THUMBNAIL_REQUEST.value,
+            ProtocolMessageType.CATALOG_FILE_DOWNLOAD_REQUEST.value,
+            ProtocolMessageType.CATALOG_CANCEL.value -> {
+                if (isFromActiveDevice(message)) {
+                    mediaCatalogListeners.forEach { it.onMediaCatalogMessage(message) }
+                    if (message.requiresAcknowledgement) sendAck(message, "processed")
+                }
             }
             ProtocolMessageType.CONNECTION_HELLO_ACK.value,
             ProtocolMessageType.CONNECTION_HELLO.value -> throw ConnectionException.InvalidMessage()
@@ -662,24 +829,30 @@ class ConnectionManager(
             try {
                 while (attempt <= reconnectConfig.maxAttempts && !manualDisconnect) {
                     val monitor = networkMonitor
-                    if (monitor?.networkState?.value == NetworkState.Unavailable) {
+                    if (monitor?.networkState?.value is NetworkState.Unavailable) {
                         _state.value = ConnectionState.NetworkUnavailable
                         monitor.networkState.first { state -> state is NetworkState.Available }
                     }
 
                     val delayDuration = reconnectConfig.delayForAttempt(attempt)
+                    val useBluetoothFallback = attempt >= 3 && bluetoothFallbackAddress != null
+                    val reconnectHost = if (useBluetoothFallback) "bt://${bluetoothFallbackAddress}" else device.host
+                    val reconnectPort = if (useBluetoothFallback) 0 else device.port
+                    val reconnectKind = if (useBluetoothFallback) TransportKind.BLUETOOTH_RFCOMM
+                        else TransportEndpoint.parse(device.host, device.port).kind
                     _state.value = ConnectionState.Reconnecting(
                         deviceId = device.id,
-                        host = device.host,
-                        port = device.port,
+                        host = reconnectHost,
+                        port = reconnectPort,
                         attempt = attempt,
                         nextRetryMessage = "Retry in ${delayDuration.inWholeSeconds} seconds",
+                        transportKind = reconnectKind,
                     )
                     NetworkLogger.info("Reconnect scheduled attempt=$attempt")
                     delay(delayDuration)
                     try {
                         NetworkLogger.info("Reconnect attempt started attempt=$attempt")
-                        connectInternal(device.host, device.port, ConnectionAttemptSource.Reconnect)
+                        connectInternal(reconnectHost, reconnectPort, ConnectionAttemptSource.Reconnect)
                         return@launch
                     } catch (error: CancellationException) {
                         throw error
@@ -716,6 +889,7 @@ class ConnectionManager(
             writerChannel = null
             pendingPong = null
             fileTransferListeners.forEach { it.onFileTransferDisconnected() }
+            mediaCatalogListeners.forEach { it.onMediaCatalogDisconnected() }
 
             ackMutex.withLock {
                 ackRetryJobs.values.forEach { it.cancel() }
@@ -751,12 +925,15 @@ class ConnectionManager(
     }
 
     private suspend fun buildHelloMessage(): HelloContext {
+        val senderDeviceId = getAndroidDeviceId().also { localDeviceId = it }
         val fingerprint = identityKeyProvider?.getPublicKeyFingerprint()
         val clientNonce = Base64Url.encode(ByteArray(32).also { SecureRandom().nextBytes(it) })
         val payload = ConnectionHelloPayload(
             deviceName = getAndroidDeviceName(),
             appVersion = appVersion,
             protocolVersion = PROTOCOL_VERSION,
+            protocolMin = PROTOCOL_MIN_VERSION,
+            protocolMax = PROTOCOL_MAX_VERSION,
             capabilities = SupportedCapabilities.values,
             identityFingerprint = fingerprint,
             clientNonce = clientNonce,
@@ -766,7 +943,7 @@ class ConnectionManager(
             protocolVersion = PROTOCOL_VERSION,
             messageId = UUID.randomUUID().toString(),
             type = ProtocolMessageType.CONNECTION_HELLO.value,
-            senderDeviceId = getAndroidDeviceId(),
+            senderDeviceId = senderDeviceId,
             timestampUtc = Instant.now().toString(),
             requiresAcknowledgement = true,
             payload = ProtocolSerializer.payloadToJson(payload),
@@ -791,6 +968,11 @@ class ConnectionManager(
             throw ConnectionException.InvalidMessage()
         }
         val payload = ProtocolSerializer.decodePayload<AuthChallengePayload>(response.payload)
+        val negotiatedVersion = ProtocolVersionNegotiator.negotiate(
+            PROTOCOL_VERSION,
+            payload.acceptedProtocolVersion,
+            payload.acceptedProtocolVersion,
+        ) ?: throw ConnectionException.UnsupportedProtocol()
         if (payload.helloMessageId != helloContext.message.messageId || Base64Url.decode(payload.serverNonce).size != 32) {
             throw ConnectionException.InvalidMessage()
         }
@@ -803,7 +985,7 @@ class ConnectionManager(
             throw SecurityAuthException("IDENTITY_KEY_CHANGED", response.senderDeviceId)
         }
         val transcript = TranscriptBuilder.sessionAuth(
-            protocolVersion = PROTOCOL_VERSION,
+            protocolVersion = negotiatedVersion,
             androidDeviceId = getAndroidDeviceId(),
             windowsDeviceId = response.senderDeviceId,
             androidFingerprint = helloContext.androidFingerprint,
@@ -827,6 +1009,8 @@ class ConnectionManager(
             port = port,
             helloMessageId = helloContext.message.messageId,
             transcript = transcript,
+            acceptedProtocolVersion = negotiatedVersion,
+            capabilities = CapabilityNegotiator.intersect(payload.capabilities),
         )
     }
 
@@ -890,8 +1074,8 @@ class ConnectionManager(
             deviceName = context.windowsDeviceName,
             host = host,
             port = port,
-            acceptedProtocolVersion = PROTOCOL_VERSION,
-            capabilities = SupportedCapabilities.values,
+            acceptedProtocolVersion = context.acceptedProtocolVersion,
+            capabilities = CapabilityNegotiator.intersect(payload.capabilities.ifEmpty { context.capabilities }),
         )
     }
 
@@ -937,7 +1121,12 @@ class ConnectionManager(
         }
 
         val payload = ProtocolSerializer.decodePayload<ConnectionHelloAckPayload>(response.payload)
-        if (payload.acceptedProtocolVersion != PROTOCOL_VERSION) {
+        val negotiatedVersion = ProtocolVersionNegotiator.negotiate(
+            PROTOCOL_VERSION,
+            payload.acceptedProtocolVersion,
+            payload.acceptedProtocolVersion,
+        )
+        if (negotiatedVersion == null) {
             throw ConnectionException.UnsupportedProtocol()
         }
         if (payload.deviceName.isBlank()) {
@@ -949,8 +1138,8 @@ class ConnectionManager(
             deviceName = payload.deviceName,
             host = host,
             port = port,
-            acceptedProtocolVersion = payload.acceptedProtocolVersion,
-            capabilities = payload.capabilities,
+            acceptedProtocolVersion = negotiatedVersion,
+            capabilities = CapabilityNegotiator.intersect(payload.capabilities),
         )
     }
 
@@ -1008,7 +1197,7 @@ class ConnectionManager(
         val remote = remoteDeviceId ?: return true
         if (message.senderDeviceId != remote) return false
         val recipient = message.recipientDeviceId
-        return recipient == null || recipient == androidDeviceId
+        return recipient == null || recipient == (localDeviceId ?: androidDeviceId)
     }
 
     private fun ConnectionState.Connected.toPairedDevice(): PairedDevice {
@@ -1033,6 +1222,7 @@ class ConnectionManager(
 
 private enum class ConnectionAttemptSource {
     Manual,
+    PairedDiscovery,
     Reconnect,
     Startup,
 }
@@ -1043,6 +1233,9 @@ private sealed interface SessionTerminationReason {
 
     data object ManualDisconnect : SessionTerminationReason
     data object NewConnectionAttempt : SessionTerminationReason
+    data object NetworkChanged : SessionTerminationReason {
+        override val error: ConnectionException = ConnectionException.ConnectionClosed()
+    }
     data object HeartbeatTimeout : SessionTerminationReason {
         override val error: ConnectionException = ConnectionException.Timeout()
     }
@@ -1078,6 +1271,8 @@ private data class AuthContext(
     val port: Int,
     val helloMessageId: String,
     val transcript: ByteArray,
+    val acceptedProtocolVersion: Int,
+    val capabilities: List<String>,
 )
 
 private enum class SessionSecurityState {

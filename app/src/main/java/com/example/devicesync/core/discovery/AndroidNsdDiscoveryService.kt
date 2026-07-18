@@ -130,7 +130,7 @@ class AndroidNsdDiscoveryService(
         if (serviceName.isBlank() || port !in 1..65535) return null
         val txt = parser.parse(attributes)
         if (txt.deviceType != null && txt.deviceType != "windows") return null
-        val addresses = resolvedAddresses()
+        val addresses = (txt.hostAddresses + txt.endpoints.map { it.address } + resolvedAddresses()).distinct()
         if (addresses.isEmpty()) return null
         return DiscoveredDevice(
             serviceName = serviceName,

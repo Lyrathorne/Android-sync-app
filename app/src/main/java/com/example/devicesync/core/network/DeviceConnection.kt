@@ -4,7 +4,9 @@ import com.example.devicesync.core.protocol.ProtocolMessage
 import kotlinx.coroutines.withTimeout
 
 interface DeviceConnection {
+    val transportKind: TransportKind get() = TransportKind.LAN
     fun setTlsServerSpkiFingerprint(fingerprint: String) = Unit
+    suspend fun connect(endpoint: TransportEndpoint) = connect(endpoint.address, endpoint.port)
     suspend fun connect(host: String, port: Int)
     suspend fun onHandshakeComplete() = Unit
     suspend fun setReadTimeout(timeoutMs: Int) = Unit

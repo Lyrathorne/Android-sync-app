@@ -35,8 +35,8 @@ class ProtocolFrameWriterTest {
         assertTrue(payload.contains("Рабочий-ПК"))
     }
 
-    @Test(expected = ConnectionException.InvalidFrame::class)
-    fun write_rejectsMessageLargerThanLimit() {
+    @Test(expected = ConnectionException.InvalidMessage::class)
+    fun write_rejectsPayloadLargerThanLimitBeforeFraming() {
         val output = ByteArrayOutputStream()
         val message = helloMessage().copy(
             payload = JsonObject(mapOf("value" to JsonPrimitive("x".repeat(1_048_577))))

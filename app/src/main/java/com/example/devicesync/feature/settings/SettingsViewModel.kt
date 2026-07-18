@@ -26,6 +26,7 @@ class SettingsViewModel(
                     it.copy(
                         autoConnectTrustedComputers = settings.autoConnectEnabled,
                         restoreConnectionAfterDisconnect = settings.restoreConnectionEnabled,
+                        allowBackgroundWork = settings.backgroundWorkEnabled,
                         useDarkTheme = settings.themeMode == ThemeMode.DARK,
                     )
                 }
@@ -43,12 +44,9 @@ class SettingsViewModel(
         viewModelScope.launch { settingsRepository?.setRestoreConnectionEnabled(enabled) }
     }
 
-    fun setShowConnectionNotification(enabled: Boolean) {
-        _uiState.update { it.copy(showConnectionNotification = enabled) }
-    }
-
     fun setAllowBackgroundWork(enabled: Boolean) {
         _uiState.update { it.copy(allowBackgroundWork = enabled) }
+        viewModelScope.launch { settingsRepository?.setBackgroundWorkEnabled(enabled) }
     }
 
     fun setUseDarkTheme(enabled: Boolean) {

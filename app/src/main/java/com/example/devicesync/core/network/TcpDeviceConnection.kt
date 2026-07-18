@@ -31,6 +31,7 @@ class TcpDeviceConnection(
     private val connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
     private val readTimeoutMs: Int = READ_TIMEOUT_MS,
 ) : DeviceConnection {
+    override val transportKind: TransportKind = TransportKind.LAN
     private val writeMutex = Mutex()
     private var socket: Socket? = null
     private var reader: ProtocolFrameReader? = null

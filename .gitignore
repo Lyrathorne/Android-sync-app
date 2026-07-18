@@ -14,6 +14,9 @@ local.properties
 captures/
 *.apk
 *.aab
+*.jks
+*.keystore
+keystore.properties
 
 ### Eclipse ###
 .apt_generated

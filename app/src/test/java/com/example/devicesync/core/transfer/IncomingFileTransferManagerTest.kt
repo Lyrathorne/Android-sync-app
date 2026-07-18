@@ -28,7 +28,7 @@ class IncomingFileTransferManagerTest {
             transferId, "hello.txt", bytes.size.toLong(), "text/plain",
             Base64Url.encode(MessageDigest.getInstance("SHA-256").digest(bytes)), 65536,
         )))
-        manager.accept("content://test/hello")
+        manager.accept("content://test/hello")?.join()
         advanceUntilIdle()
         transport.deliver(message(ProtocolMessageType.FILE_CHUNK, FileChunkPayload(
             transferId, 0, 0, java.util.Base64.getEncoder().encodeToString(bytes),
@@ -56,7 +56,7 @@ class IncomingFileTransferManagerTest {
         transport.deliver(message(ProtocolMessageType.FILE_OFFER, FileOfferPayload(
             transferId, "resume.bin", bytes.size.toLong(), "application/octet-stream", fileHash, 65536,
         )))
-        first.accept("content://test/resume")
+        first.accept("content://test/resume")?.join()
         advanceUntilIdle()
         val firstBytes = bytes.copyOfRange(0, 65536)
         transport.deliver(message(ProtocolMessageType.FILE_CHUNK, FileChunkPayload(

@@ -74,6 +74,7 @@ class IncomingFileTransferManager(
     private val checkpointStore: IncomingTransferCheckpointStore? = null,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val folderAuthorizer: FolderIncomingFileAuthorizer? = null,
+    private val historyRepository: TransferHistoryRepository? = null,
 ) : FileTransferMessageListener {
     companion object {
         const val MAX_FILE_SIZE_BYTES = 100L * 1024 * 1024
@@ -117,6 +118,7 @@ class IncomingFileTransferManager(
                 digest = null
                 active = null
                 _state.value = IncomingFileTransferState.Failed(transfer, "disconnected", "The connection was lost; transfer can be resumed.")
+                recordHistory(transfer, "failed", "Connection lost; transfer can be resumed.")
             } else {
                 cleanup(cancelled = true)
             }
@@ -152,6 +154,7 @@ class IncomingFileTransferManager(
             folderTarget = folderTarget,
         )
         _state.value = IncomingFileTransferState.Offered(active!!)
+        recordHistory(active!!, "offered")
         if (folderTarget != null) acceptImmediately(folderTarget.temporaryUri)
     }
 
@@ -170,10 +173,10 @@ class IncomingFileTransferManager(
         }
     }
 
-    fun accept(destinationUri: String) {
-        val transfer = active ?: return
-        if (_state.value !is IncomingFileTransferState.Offered) return
-        offerJob = scope.launch(Dispatchers.IO) {
+    fun accept(destinationUri: String): Job? {
+        val transfer = active ?: return null
+        if (_state.value !is IncomingFileTransferState.Offered) return null
+        return scope.launch(Dispatchers.IO) {
             try {
                 output = destination.open(destinationUri)
                 digest = MessageDigest.getInstance("SHA-256")
@@ -185,7 +188,7 @@ class IncomingFileTransferManager(
             } catch (error: Throwable) {
                 fail("destination_open_failed", error.message ?: "Cannot open destination.")
             }
-        }
+        }.also { offerJob = it }
     }
 
     fun reject(code: String = "user_rejected") {
@@ -266,6 +269,7 @@ class IncomingFileTransferManager(
             completedReceipts[transfer.transferId] = receipt
             send(ProtocolMessageType.FILE_RECEIVED, receipt)
             _state.value = IncomingFileTransferState.Completed(transfer.copy(destinationUri = committedUri ?: transfer.destinationUri))
+            recordHistory(transfer, "completed")
             checkpointStore?.delete(transfer.transferId)
             active = null
             digest = null
@@ -284,9 +288,11 @@ class IncomingFileTransferManager(
         active = null
         digest = null
         _state.value = IncomingFileTransferState.Failed(transfer, code, message)
+        transfer?.let { recordHistory(it, "failed", message) }
     }
 
     private fun cleanup(cancelled: Boolean) {
+        val transfer = active
         offerJob?.cancel()
         runCatching { output?.close() }
         output = null
@@ -295,6 +301,7 @@ class IncomingFileTransferManager(
         active = null
         digest = null
         if (cancelled) _state.value = IncomingFileTransferState.Cancelled
+        if (cancelled && transfer != null) recordHistory(transfer, "cancelled")
     }
 
     private fun validate(offer: FileOfferPayload): String? = when {
@@ -379,5 +386,19 @@ class IncomingFileTransferManager(
             transfer.sizeBytes, transfer.expectedSha256, transfer.chunkSize, transfer.destinationUri,
             transfer.receivedBytes, transfer.nextChunkIndex, transfer.startedAtMillis, nowMillis(), transfer.chunkSha256,
         ))
+    }
+
+    private fun recordHistory(transfer: IncomingAndroidFileTransfer, status: String, detail: String? = null) {
+        historyRepository?.record(
+            TransferHistoryEntry(
+                transferId = transfer.transferId,
+                direction = "incoming",
+                fileName = transfer.fileName,
+                status = status,
+                sizeBytes = transfer.sizeBytes,
+                updatedAtMillis = nowMillis(),
+                detail = detail,
+            )
+        )
     }
 }

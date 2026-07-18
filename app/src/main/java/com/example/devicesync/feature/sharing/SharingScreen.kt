@@ -13,19 +13,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.devicesync.core.sharing.SharingManager
-import com.example.devicesync.core.notifications.NotificationForwardingPreferences
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.example.devicesync.core.foldersync.FolderSyncManager
 import com.example.devicesync.core.foldersync.FolderConflictResolutions
 import kotlinx.coroutines.launch
+import androidx.compose.ui.res.stringResource
+import com.example.devicesync.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SharingScreen(
     manager: SharingManager,
-    notificationPreferences: NotificationForwardingPreferences,
     folderSyncManager: FolderSyncManager,
     onBackClick: () -> Unit,
 ) {
@@ -38,9 +37,10 @@ fun SharingScreen(
     var conflictResolutions by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var text by remember { mutableStateOf("") }
     var clipboardEnabled by remember { mutableStateOf(manager.clipboardEnabled) }
+    val clipboardDeviceId = manager.currentClipboardDeviceId()
+    var clipboardDeviceEnabled by remember(clipboardDeviceId) { mutableStateOf(manager.isClipboardAllowedForCurrentDevice()) }
     var error by remember { mutableStateOf<String?>(null) }
-    var notificationsEnabled by remember { mutableStateOf(notificationPreferences.enabled) }
-    var allowedPackages by remember { mutableStateOf(notificationPreferences.allowedPackages.joinToString(", ")) }
+    var success by remember { mutableStateOf<String?>(null) }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
@@ -55,23 +55,21 @@ fun SharingScreen(
         TextButton(onClick = onBackClick) { Text("Back") }
     }) }) { padding ->
         Column(Modifier.padding(padding).padding(20.dp).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row { Switch(clipboardEnabled, onCheckedChange = { clipboardEnabled = it; manager.clipboardEnabled = it }); Spacer(Modifier.width(8.dp)); Text("Clipboard sync (opt-in)") }
-            Row { Switch(notificationsEnabled, onCheckedChange = {
-                notificationsEnabled = it
-                notificationPreferences.enabled = it
-            }); Spacer(Modifier.width(8.dp)); Text("Forward allowed notifications") }
-            OutlinedTextField(
-                allowedPackages,
-                {
-                    allowedPackages = it
-                    notificationPreferences.allowedPackages = it.split(',').map(String::trim).filter(String::isNotEmpty).toSet()
-                },
-                label = { Text("Allowed package names") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedButton(onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
-                Text("Grant notification access")
+            Row { Switch(clipboardEnabled, onCheckedChange = { clipboardEnabled = it; manager.clipboardEnabled = it }); Spacer(Modifier.width(8.dp)); Text(stringResource(R.string.clipboard_global_opt_in)) }
+            Row {
+                Switch(
+                    checked = clipboardDeviceEnabled,
+                    enabled = clipboardDeviceId != null,
+                    onCheckedChange = {
+                        if (manager.setClipboardAllowedForCurrentDevice(it)) clipboardDeviceEnabled = it
+                    },
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.clipboard_device_permission))
             }
+            if (clipboardDeviceId == null) Text(stringResource(R.string.clipboard_no_device), color = MaterialTheme.colorScheme.error)
+            Text(stringResource(R.string.clipboard_android_limit))
+            Text(stringResource(R.string.clipboard_private_note), style = MaterialTheme.typography.bodySmall)
             OutlinedButton(onClick = { folderPicker.launch(null) }) { Text("Select folder to compare") }
             folderPlan?.let { plan ->
                 Text("Folder plan: ${plan.operations.count { it.action == "upload" }} upload, " +
@@ -100,13 +98,26 @@ fun SharingScreen(
             Text(folderStatus)
             OutlinedTextField(text, { text = it }, label = { Text("Text or https:// link") }, modifier = Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { scope.launch { runCatching { manager.sendText(text) }.onFailure { error = it.message } } }) { Text("Send") }
+                Button(onClick = { scope.launch {
+                    error = null
+                    success = null
+                    runCatching { manager.sendText(text) }
+                        .onSuccess { text = ""; success = "Text sent to the connected computer." }
+                        .onFailure { error = it.message }
+                } }) { Text("Send") }
                 OutlinedButton(onClick = {
                     val clipboard = context.getSystemService(ClipboardManager::class.java)
                     val value = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                    scope.launch { runCatching { manager.sendClipboard(value) }.onFailure { error = it.message } }
+                    scope.launch {
+                        error = null
+                        success = null
+                        runCatching { manager.sendClipboardNow(value) }
+                            .onSuccess { success = "Clipboard text sent to the connected computer." }
+                            .onFailure { error = it.message }
+                    }
                 }) { Text("Send clipboard") }
             }
+            success?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text("Recent items", style = MaterialTheme.typography.titleMedium)
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {

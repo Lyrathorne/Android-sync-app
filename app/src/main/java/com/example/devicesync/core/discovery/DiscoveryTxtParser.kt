@@ -29,6 +29,22 @@ class DiscoveryTxtParser(
                 ?.filter { it.isNotEmpty() }
                 .orEmpty(),
             pairingAvailable = text("pairingAvailable")?.toBooleanStrictOrNull(),
+            hostAddresses = text("addresses")
+                ?.split(',')
+                ?.map(String::trim)
+                ?.filter(String::isNotEmpty)
+                .orEmpty(),
+            endpoints = text("endpoints")
+                ?.split(';')
+                ?.mapNotNull { value ->
+                    val parts = value.split('|')
+                    if (parts.size != 3) null else {
+                        val port = parts[2].toIntOrNull()
+                        if (parts[1].isBlank() || port == null || port !in 1..65535) null
+                        else DiscoveryEndpointRecord(parts[0], parts[1], port)
+                    }
+                }
+                .orEmpty(),
         )
     }
 }
@@ -42,4 +58,12 @@ data class DiscoveryTxtRecords(
     val appVersion: String?,
     val capabilities: List<String>,
     val pairingAvailable: Boolean?,
+    val hostAddresses: List<String>,
+    val endpoints: List<DiscoveryEndpointRecord>,
+)
+
+data class DiscoveryEndpointRecord(
+    val kind: String,
+    val address: String,
+    val port: Int,
 )

@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 data class AppSettings(
     val autoConnectEnabled: Boolean = true,
     val restoreConnectionEnabled: Boolean = true,
+    val backgroundWorkEnabled: Boolean = false,
     val lastSelectedDeviceId: String? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
 )
@@ -19,6 +20,7 @@ interface AppSettingsRepository {
     val settings: Flow<AppSettings>
     suspend fun setAutoConnectEnabled(enabled: Boolean)
     suspend fun setRestoreConnectionEnabled(enabled: Boolean)
+    suspend fun setBackgroundWorkEnabled(enabled: Boolean)
     suspend fun setLastSelectedDeviceId(deviceId: String?)
     suspend fun setThemeMode(mode: ThemeMode)
 }

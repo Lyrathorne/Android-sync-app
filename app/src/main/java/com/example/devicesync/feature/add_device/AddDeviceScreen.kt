@@ -1,5 +1,9 @@
 package com.example.devicesync.feature.add_device
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +39,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.devicesync.R
 import com.example.devicesync.core.discovery.DiscoveredDevice
 import com.example.devicesync.core.discovery.DiscoveryState
+import com.example.devicesync.core.network.BluetoothFallbackCandidate
 import com.example.devicesync.ui.theme.DeviceSyncTheme
 
 @Composable
@@ -42,9 +47,15 @@ fun AddDeviceRoute(
     onBackClick: () -> Unit,
     onScanQrClick: () -> Unit,
     onConnected: (String) -> Unit,
+    showManualConnection: Boolean = false,
     viewModel: AddDeviceViewModel = viewModel(),
 ) {
     val uiState = viewModel.uiState.collectAsStateWithLifecycle()
+    val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) viewModel.refreshBluetoothCandidates()
+    }
     LaunchedEffect(uiState.value.connectedDeviceId) {
         uiState.value.connectedDeviceId?.let(onConnected)
     }
@@ -60,6 +71,15 @@ fun AddDeviceRoute(
         onIpChanged = viewModel::onIpChanged,
         onPortChanged = viewModel::onPortChanged,
         onConnectManualClick = viewModel::connectManually,
+        onFindBluetoothClick = {
+            if (Build.VERSION.SDK_INT >= 31) {
+                bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            } else {
+                viewModel.refreshBluetoothCandidates()
+            }
+        },
+        onConnectBluetoothClick = viewModel::connectBluetooth,
+        showManualConnection = showManualConnection,
     )
 }
 
@@ -76,6 +96,9 @@ fun AddDeviceScreen(
     onIpChanged: (String) -> Unit,
     onPortChanged: (String) -> Unit,
     onConnectManualClick: () -> Unit,
+    onFindBluetoothClick: () -> Unit,
+    onConnectBluetoothClick: (BluetoothFallbackCandidate) -> Unit,
+    showManualConnection: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
@@ -123,19 +146,69 @@ fun AddDeviceScreen(
             ) {
                 Text(stringResource(R.string.scan_qr))
             }
-            OutlinedButton(
-                onClick = onManualClick,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.enter_ip_manually))
+            BluetoothFallbackCard(
+                uiState = uiState,
+                onFindClick = onFindBluetoothClick,
+                onConnectClick = onConnectBluetoothClick,
+            )
+            if (showManualConnection) {
+                OutlinedButton(
+                    onClick = onManualClick,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.enter_ip_manually))
+                }
             }
-            if (uiState.isManualFormVisible) {
+            if (showManualConnection && uiState.isManualFormVisible) {
                 ManualConnectionForm(
                     uiState = uiState,
                     onIpChanged = onIpChanged,
                     onPortChanged = onPortChanged,
                     onConnectClick = onConnectManualClick,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BluetoothFallbackCard(
+    uiState: AddDeviceUiState,
+    onFindClick: () -> Unit,
+    onConnectClick: (BluetoothFallbackCandidate) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Bluetooth fallback", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Use only when LAN, hotspot, or USB tethering is unavailable. Both devices must already be paired in system Bluetooth settings.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            OutlinedButton(onClick = onFindClick, modifier = Modifier.fillMaxWidth()) {
+                Text("Find paired computers")
+            }
+            uiState.bluetoothStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+            uiState.bluetoothCandidates.forEach { candidate ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(candidate.computerName, style = MaterialTheme.typography.titleSmall)
+                        Text("${candidate.bluetoothName} • slow secure channel")
+                        Button(
+                            onClick = { onConnectClick(candidate) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Connect via Bluetooth")
+                        }
+                    }
+                }
             }
         }
     }
@@ -205,7 +278,6 @@ private fun AutoSearchCard(
             uiState.discoveryConnectionError?.let {
                 Text(text = it, color = MaterialTheme.colorScheme.error)
             }
-            DiscoveryDiagnosticsText(uiState)
         }
     }
 }
@@ -359,6 +431,8 @@ private fun AddDeviceScreenPreview() {
             onIpChanged = {},
             onPortChanged = {},
             onConnectManualClick = {},
+            onFindBluetoothClick = {},
+            onConnectBluetoothClick = {},
         )
     }
 }

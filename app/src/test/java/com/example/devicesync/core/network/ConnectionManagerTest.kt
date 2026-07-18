@@ -21,9 +21,12 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -164,6 +167,39 @@ class ConnectionManagerTest {
         assertTrue(connection.sent.any { it.type == ProtocolMessageType.AUTH_RESPONSE.value })
         assertEquals("windows-device-id", connected.deviceId)
         assertEquals(ConnectionState.Connected::class, manager.state.value::class)
+    }
+
+    @Test
+    fun incomingFeatureMessage_usesPersistentLocalDeviceId() = runTest {
+        val connection = InjectableDeviceConnection()
+        val manager = ConnectionManager(
+            connectionFactory = { connection },
+            identityRepository = TestDeviceIdentityRepository(),
+            scope = this,
+        )
+        val received = CompletableDeferred<ProtocolMessage>()
+        manager.addSharingListener(object : SharingMessageListener {
+            override suspend fun onSharingMessage(message: ProtocolMessage) {
+                received.complete(message)
+            }
+        })
+        manager.connect("127.0.0.1", 53321)
+
+        connection.incoming.send(
+            ProtocolMessage(
+                protocolVersion = 1,
+                messageId = "clipboard-1",
+                type = ProtocolMessageType.CLIPBOARD_UPDATE.value,
+                senderDeviceId = "windows-device-id",
+                recipientDeviceId = "android-device",
+                timestampUtc = "2026-07-14T12:00:00Z",
+                payload = JsonObject(emptyMap()),
+            )
+        )
+        runCurrent()
+
+        assertEquals("clipboard-1", withTimeout(1_000) { received.await() }.messageId)
+        manager.disconnect()
     }
 
     @Test
@@ -327,6 +363,30 @@ private class AddressAttemptConnection(
     }
 
     override suspend fun disconnect() = Unit
+}
+
+private class InjectableDeviceConnection : DeviceConnection {
+    val incoming = Channel<ProtocolMessage>(Channel.UNLIMITED)
+    private var sentHello: ProtocolMessage? = null
+    private var helloAckReturned = false
+
+    override suspend fun connect(host: String, port: Int) = Unit
+
+    override suspend fun send(message: ProtocolMessage) {
+        if (message.type == ProtocolMessageType.CONNECTION_HELLO.value) sentHello = message
+    }
+
+    override suspend fun receive(): ProtocolMessage {
+        if (!helloAckReturned) {
+            helloAckReturned = true
+            return helloAckMessage(correlationId = checkNotNull(sentHello).messageId)
+        }
+        return incoming.receive()
+    }
+
+    override suspend fun disconnect() {
+        incoming.close()
+    }
 }
 
 private class TestDeviceIdentityRepository : DeviceIdentityRepository {

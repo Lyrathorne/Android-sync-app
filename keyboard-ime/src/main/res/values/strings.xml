@@ -1,0 +1,5 @@
+<resources>
+    <string name="keyboard_name">DeviceSync Keyboard</string>
+    <string name="keyboard_subtype_ru">Русский</string>
+    <string name="keyboard_subtype_en">English</string>
+</resources>

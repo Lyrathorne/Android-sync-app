@@ -1,6 +1,7 @@
 package com.example.devicesync.core.protocol
 
 import com.example.devicesync.core.network.ConnectionException
+import com.example.devicesync.core.network.MAX_JSON_PAYLOAD_SIZE
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
@@ -22,6 +23,7 @@ object ProtocolSerializer {
 
     fun serialize(message: ProtocolMessage): String {
         return try {
+            validatePayloadSize(message.payload)
             json.encodeToString(message)
         } catch (error: SerializationException) {
             throw ConnectionException.InvalidMessage(cause = error)
@@ -30,7 +32,7 @@ object ProtocolSerializer {
 
     fun deserialize(rawJson: String): ProtocolMessage {
         return try {
-            json.decodeFromString<ProtocolMessage>(rawJson)
+            json.decodeFromString<ProtocolMessage>(rawJson).also { validatePayloadSize(it.payload) }
         } catch (error: IllegalArgumentException) {
             throw ConnectionException.InvalidMessage(cause = error)
         } catch (error: SerializationException) {
@@ -49,6 +51,12 @@ object ProtocolSerializer {
             throw ConnectionException.InvalidMessage(cause = error)
         } catch (error: SerializationException) {
             throw ConnectionException.InvalidMessage(cause = error)
+        }
+    }
+
+    fun validatePayloadSize(payload: JsonElement) {
+        if (payload.toString().encodeToByteArray().size > MAX_JSON_PAYLOAD_SIZE) {
+            throw ConnectionException.InvalidMessage(ProtocolErrorCodes.PAYLOAD_TOO_LARGE)
         }
     }
 }

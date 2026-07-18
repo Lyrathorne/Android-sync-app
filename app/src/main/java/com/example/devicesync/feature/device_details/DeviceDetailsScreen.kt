@@ -126,7 +126,6 @@ fun DeviceDetailsScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 DeviceSummaryCard(uiState)
-                DiagnosticsCard(uiState)
                 FutureFeaturesCard()
                 Button(
                     onClick = {

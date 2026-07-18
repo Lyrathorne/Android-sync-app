@@ -22,3 +22,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "DeviceSync"
 include(":app")
+include(":keyboard-engine")
+include(":keyboard-ime")

@@ -108,6 +108,16 @@ class FileTransferManager(
             if (metadata.sizeBytes !in 0..MAXIMUM_FILE_SIZE) {
                 fail("file_too_large", "The selected file exceeds the 100 MiB limit.")
             }
+            val transportLimit = com.example.devicesync.core.network.TransportProfile
+                .forKind(connected.transportKind)
+                .maximumFileBytes
+            val transferChunkSize = if (connected.slowTransport) 24 * 1024 else CHUNK_SIZE
+            if (metadata.sizeBytes > transportLimit) {
+                fail(
+                    "transport_file_too_large",
+                    "This transport supports files up to ${transportLimit / (1024 * 1024)} MiB.",
+                )
+            }
 
             _state.value = FileTransferState.Hashing
             val sha256 = resumePoint?.sha256 ?: metadataSource.open(uri).use { stream ->
@@ -135,7 +145,7 @@ class FileTransferManager(
                         sizeBytes = transfer.sizeBytes,
                         mimeType = transfer.mimeType,
                         sha256 = transfer.sha256,
-                        chunkSize = CHUNK_SIZE,
+                        chunkSize = transferChunkSize,
                         folderSyncId = folder?.syncId,
                         relativePath = folder?.relativePath,
                         conflictCopy = folder?.conflictCopy ?: false,
@@ -146,7 +156,7 @@ class FileTransferManager(
                 transport.sendFileTransferMessage(
                     ProtocolMessageType.FILE_RESUME_REQUEST.value,
                     ProtocolSerializer.payloadToJson(FileResumeRequestPayload(
-                        transfer.transferId, transfer.fileName, transfer.sizeBytes, transfer.sha256, CHUNK_SIZE,
+                        transfer.transferId, transfer.fileName, transfer.sizeBytes, transfer.sha256, transferChunkSize,
                         folder?.syncId, folder?.relativePath, folder?.conflictCopy ?: false,
                     )),
                 )
@@ -171,7 +181,7 @@ class FileTransferManager(
 
             metadataSource.open(uri).use { stream ->
                 skipFully(stream, sentBytes)
-                val buffer = ByteArray(CHUNK_SIZE)
+                val buffer = ByteArray(transferChunkSize)
                 while (true) {
                     val count = readChunk(stream, buffer)
                     if (count == 0) break
